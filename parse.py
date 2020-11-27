@@ -51,13 +51,13 @@ type_field_entry_size_bytes = Union[int, Callable[["Ad2cpDataPacket"], int]]
 # Shape of the entries in the field. Can be a function
 type_field_shape = Union[List[int], Callable[["Ad2cpDataPacket"], List[int]]]
 # Type of each entry
-type_field_data_type = DataType
+type_field_entry_data_type = DataType
 # Optional predicate to determine whether the field exists at all
 type_predicate = Callable[["Ad2cpDataPacket"], bool]
 type_without_predicate_field = Tuple[type_field_name,
-                                     type_field_entry_size_bytes, type_field_data_type, type_field_shape]
+                                     type_field_entry_size_bytes, type_field_entry_data_type, type_field_shape]
 type_with_predicate_field = Tuple[type_field_name,
-                                  type_field_entry_size_bytes, type_field_data_type, type_field_shape, type_predicate]
+                                  type_field_entry_size_bytes, type_field_entry_data_type, type_field_shape, type_predicate]
 type_field = Union[type_without_predicate_field, type_with_predicate_field]
 
 
@@ -142,9 +142,9 @@ class Ad2cpDataPacket:
         raw_bytes = bytes()  # combination of all raw fields
         for field_format in data_format:
             if len(field_format) == 4:
-                field_name, field_entry_size_bytes, field_data_type, field_shape = field_format
+                field_name, field_entry_size_bytes, field_entry_data_type, field_shape = field_format
             elif len(field_format) == 5:
-                field_name, field_entry_size_bytes, field_data_type, field_shape, predicate = field_format
+                field_name, field_entry_size_bytes, field_entry_data_type, field_shape, predicate = field_format
                 if not predicate(self):
                     continue
             else:
@@ -159,12 +159,12 @@ class Ad2cpDataPacket:
                 f, field_entry_size_bytes * math.prod(field_shape))
             raw_bytes += raw_field
             if len(field_shape) == 0:
-                parsed_field = self._parse(raw_field, field_data_type)
+                parsed_field = self._parse(raw_field, field_entry_data_type)
             else:
                 raw_field_entries = [raw_field[i * field_entry_size_bytes:(
-                    i + 1) * field_entry_size_bytes] for i in range(np.prod(field_shape))]
+                    i + 1) * field_entry_size_bytes] for i in range(math.prod(field_shape))]
                 parsed_field_entries = [self._parse(
-                    raw_field_entry, field_data_type) for raw_field_entry in raw_field_entries]
+                    raw_field_entry, field_entry_data_type) for raw_field_entry in raw_field_entries]
                 parsed_field = np.reshape(parsed_field_entries, field_shape)
             if field_name is not None:
                 setattr(self, field_name, parsed_field)
