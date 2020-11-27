@@ -14,6 +14,12 @@ class BurstAverageDataRecordVersion(Enum):
     VERSION2 = auto()  # Burst/Average Data Record Definition (DF2)
     VERSION3 = auto()  # Burst/Average Data Record Definition (DF3)
 
+@unique
+class DataRecordType(Enum):
+    BURST_AVERAGE_VERSION2 = auto()
+    BURST_AVERAGE_VERSION3 = auto()
+    BOTTOM_TRACK = auto()
+    STRING = auto()
 
 @unique
 class DataType(Enum):
@@ -67,6 +73,7 @@ class Ad2cpDataPacket:
     def __init__(self, f: TextIO, burst_average_data_record_version: BurstAverageDataRecordVersion, number_of_altimiter_samples: int):
         self.burst_average_data_record_version = burst_average_data_record_version
         self.number_of_altimiter_samples = number_of_altimiter_samples
+        self.data_record_type: Optional[DataRecordType] = None
         self._read_header(f)
         self._read_data_record(f)
 
@@ -113,19 +120,24 @@ class Ad2cpDataPacket:
         if self.id in (0x15, 0x16, 0x18, ):  # burst/average
             if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
                 data_record_format = self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION2
             elif self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION3:
                 data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
             else:
                 raise ValueError("invalid burst/average data record version")
         elif self.id == 0x1c:  # echosounder
             # echosounder is only supported by burst/average v3
             data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
         elif self.id in (0x17, 0x1b):  # bottom track
             data_record_format = self.BOTTOM_TRACK_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.BOTTOM_TRACK
         elif self.id == 0xa0:  # string data
             data_record_format = self.STRING_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.STRING
         else:
-            raise ValueError("invalid id")
+            raise ValueError("invalid data record type id")
 
         raw_data_record = self._read_data(f, data_record_format)
         print("data record checksum calculated:", self.checksum(
@@ -179,7 +191,7 @@ class Ad2cpDataPacket:
         parsing each field in a data record.
         """
 
-        if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
+        if self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION2:
             if field_name == "configuration":
                 self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
                 self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
@@ -194,7 +206,7 @@ class Ad2cpDataPacket:
                     self.num_beams_and_coordinate_system_and_num_cells & 0b0000_1100_0000_0000) >> 10
                 self.num_beams = (
                     self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
-        elif self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION3:
+        elif self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION3:
             if field_name == "configuration":
                 self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
                 self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
@@ -227,6 +239,21 @@ class Ad2cpDataPacket:
                     self.echo_sounder_frequency = self.ambiguity_velocity_or_echo_sounder_frequency
                 else:
                     self.ambiguity_velocity = self.ambiguity_velocity_or_echo_sounder_frequency
+        elif self.data_record_type == DataRecordType.BOTTOM_TRACK:
+            if field_name == "configuration":
+                self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
+                self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
+                self.compass_sensor_valid = self.configuration & 0b0000_0000_0000_0100 > 0
+                self.tilt_sensor_valid = self.configuration & 0b0000_0000_0000_1000 > 0
+                self.velocity_data_included = self.configuration & 0b0000_0000_0010_0000 > 0
+                self.distance_data_included = self.configuration & 0b0000_0001_0000_0000 > 0
+                self.figure_of_merit_data_included = self.configuration & 0b0000_0010_0000_0000 > 0
+            elif field_name == "num_beams_and_coordinate_system_and_num_cells":
+                self.num_cells = self.num_beams_and_coordinate_system_and_num_cells & 0b0000_0011_1111_1111
+                self.coordinate_system = (
+                    self.num_beams_and_coordinate_system_and_num_cells & 0b0000_1100_0000_0000) >> 10
+                self.num_beams = (
+                    self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
 
     @staticmethod
     def checksum(data: bytes) -> int:
@@ -291,9 +318,12 @@ class Ad2cpDataPacket:
         ("ambiguity_velocity", 2, UNSIGNED_INTEGER),
         ("dataset_description", 2, UNSIGNED_INTEGER),
         ("transmit_energy", 2, UNSIGNED_INTEGER),
-        ("velocity_scaling", 1, UNSIGNED_INTEGER),
+        ("velocity_scaling", 1, SIGNED_INTEGER),
         ("power_level", 1, SIGNED_INTEGER),
         (None, 4, UNSIGNED_INTEGER),
+        # TODO: this data is interpreted as raw bytes instead of integers
+        # because it actually contains a large series of integers. The raw bytes
+        # need to be split into integers during postprocessing
         (
             "velocity_data",
             lambda self: self.num_beams * self.num_cells * 2,
@@ -346,7 +376,7 @@ class Ad2cpDataPacket:
         ("ambiguity_velocity_or_echo_sounder_frequency", 2, UNSIGNED_INTEGER),
         ("dataset_description", 2, UNSIGNED_INTEGER),
         ("transmit_energy", 2, UNSIGNED_INTEGER),
-        ("velocity_scaling", 1, UNSIGNED_INTEGER),
+        ("velocity_scaling", 1, SIGNED_INTEGER),
         ("power_level", 1, SIGNED_INTEGER),
         ("magnetometer_temperature", 2, SIGNED_INTEGER),
         ("real_time_clock_temperature", 2, SIGNED_INTEGER),
@@ -444,7 +474,63 @@ class Ad2cpDataPacket:
         (None, 24, RAW_BYTES, lambda self: self.std_dev_data_included)
     ]
     BOTTOM_TRACK_DATA_RECORD_FORMAT = [
-        # TODO: add bottom track data record format
+        ("version", 1, UNSIGNED_INTEGER),
+        ("offset_of_data", 1, UNSIGNED_INTEGER),
+        ("configuration", 2, UNSIGNED_INTEGER),
+        ("serial_number", 4, UNSIGNED_INTEGER),
+        ("year", 1, UNSIGNED_INTEGER),
+        ("month", 1, UNSIGNED_INTEGER),
+        ("day", 1, UNSIGNED_INTEGER),
+        ("hour", 1, UNSIGNED_INTEGER),
+        ("minute", 1, UNSIGNED_INTEGER),
+        ("seconds", 1, UNSIGNED_INTEGER),
+        ("microsec100", 2, UNSIGNED_INTEGER),
+        ("speed_of_sound", 2, UNSIGNED_INTEGER),
+        ("temperature", 2, SIGNED_INTEGER),
+        ("pressure", 4, UNSIGNED_INTEGER),
+        ("heading", 2, UNSIGNED_INTEGER),
+        ("pitch", 2, SIGNED_INTEGER),
+        ("roll", 2, SIGNED_INTEGER),
+        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
+        ("cell_size", 2, UNSIGNED_INTEGER),
+        ("blanking", 2, UNSIGNED_INTEGER),
+        ("nominal_correlation", 1, UNSIGNED_INTEGER),
+        (None, 1, RAW_BYTES),
+        ("battery_voltage", 2, UNSIGNED_INTEGER),
+        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER),
+        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER),
+        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER),
+        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
+        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
+        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
+        ("ambiguity_velocity", 4, UNSIGNED_INTEGER),
+        ("dataset_description", 2, UNSIGNED_INTEGER),
+        ("transmit_energy", 2, UNSIGNED_INTEGER),
+        ("velocity_scaling", 1, SIGNED_INTEGER),
+        ("power_level", 1, SIGNED_INTEGER),
+        ("magnetometer_temperature", 2, SIGNED_INTEGER),
+        ("real_time_clock_temperature", 2, SIGNED_INTEGER),
+        ("error", 4, UNSIGNED_INTEGER),
+        ("status", 4, UNSIGNED_INTEGER),
+        ("ensemble_counter", 4, UNSIGNED_INTEGER),
+        (
+            "velocity_data",
+            lambda self: self.num_beams * 4,
+            RAW_BYTES,
+            lambda self: self.velocity_data_included
+        ),
+        (
+            "distance_data",
+            lambda self: self.num_beams * 4,
+            RAW_BYTES,
+            lambda self: self.distance_data_included
+        ),
+        (
+            "figure_of_merit_data",
+            lambda self: self.num_beams * 2,
+            RAW_BYTES,
+            lambda self: self.figure_of_merit_data_included
+        )
     ]
 
 
