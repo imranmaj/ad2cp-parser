@@ -218,11 +218,6 @@ class Ad2cpDataPacket:
                 else:
                     self.ambiguity_velocity = self.ambiguity_velocity_or_echo_sounder_frequency
 
-    # @staticmethod
-    # def _reverse_bits(n: int, width: int) -> int:
-    #     b = "{:0{width}b}".format(n, width=width)
-    #     return int(b[:: -1], 2)
-
     @staticmethod
     def checksum(data: bytes) -> int:
         """
@@ -378,6 +373,9 @@ class Ad2cpDataPacket:
         ("altimiter_spare", 8, RAW_BYTES, lambda self: self.ast_data_included),
         (
             "altimiter_raw_data_num_samples",
+            # TODO: other counts, like the number of beams or number of cells, can be found
+            # by parsing the data itself, but it seems like the number of altimiter samples
+            # must be known beforehand. Is there a way to calculate this instead?
             lambda self: self.number_of_altimiter_samples * 2,
             RAW_BYTES,
             lambda self: self.altimiter_raw_data_included
@@ -423,7 +421,7 @@ class Ad2cpDataPacket:
         (None, 24, RAW_BYTES, lambda self: self.std_dev_data_included)
     ]
     BOTTOM_TRACK_DATA_RECORD_FORMAT = [
-
+        # TODO: add bottom track data record format
     ]
 
 
