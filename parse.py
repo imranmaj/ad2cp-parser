@@ -77,25 +77,6 @@ class Ad2cpDataPacket:
         self._read_header(f)
         self._read_data_record(f)
 
-    @staticmethod
-    def _read_exact(f: BinaryIO, total_num_bytes_to_read: int) -> bytes:
-        """
-        Drives a stream until an exact amount of bytes is read from it.
-        This is necessary because a single read may not return the correct number of bytes.
-        """
-
-        all_bytes_read = bytes()
-        if total_num_bytes_to_read <= 0:
-            return all_bytes_read
-        last_bytes_read = None
-        while last_bytes_read is None or (len(last_bytes_read) > 0 and len(all_bytes_read) < total_num_bytes_to_read):
-            last_bytes_read = f.read(total_num_bytes_to_read - len(all_bytes_read))
-            if len(last_bytes_read) == 0:
-                raise NoMorePackets
-            else:
-                all_bytes_read += last_bytes_read
-        return all_bytes_read
-
     def _read_header(self, f: BinaryIO):
         """
         Reads the header part of the AD2CP packet from the stream
@@ -182,6 +163,25 @@ class Ad2cpDataPacket:
                 self._postprocess(field_name)
 
         return raw_bytes
+
+    @staticmethod
+    def _read_exact(f: BinaryIO, total_num_bytes_to_read: int) -> bytes:
+        """
+        Drives a stream until an exact amount of bytes is read from it.
+        This is necessary because a single read may not return the correct number of bytes.
+        """
+
+        all_bytes_read = bytes()
+        if total_num_bytes_to_read <= 0:
+            return all_bytes_read
+        last_bytes_read = None
+        while last_bytes_read is None or (len(last_bytes_read) > 0 and len(all_bytes_read) < total_num_bytes_to_read):
+            last_bytes_read = f.read(total_num_bytes_to_read - len(all_bytes_read))
+            if len(last_bytes_read) == 0:
+                raise NoMorePackets
+            else:
+                all_bytes_read += last_bytes_read
+        return all_bytes_read
 
     def _postprocess(self, field_name):
         """
