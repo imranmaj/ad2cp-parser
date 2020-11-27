@@ -116,7 +116,7 @@ class Ad2cpDataPacket:
             else:
                 raise ValueError("invalid burst/average data record version")
         elif self.id == 0x1c:  # echosounder
-            # echosounder is only supported by burst/average v3
+            # echosounder is only supported by burst/average version 3
             data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
         elif self.id in (0x17, 0x1b):  # bottom track
@@ -188,9 +188,9 @@ class Ad2cpDataPacket:
             return int.from_bytes(
                 value, byteorder="little", signed=False)
         elif data_type == DataType.FLOAT and len(value) == 4:
-            return struct.unpack("f", value)
+            return struct.unpack("<f", value)
         elif data_type == DataType.FLOAT and len(value) == 8:
-            return struct.unpack("d", value)
+            return struct.unpack("<d", value)
         elif data_type == DataType.SIGNED_FRACTION:
             # TODO: ??????
             pass
