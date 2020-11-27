@@ -87,11 +87,9 @@ class Ad2cpDataPacket:
         all_bytes_read = bytes()
         if total_num_bytes_to_read <= 0:
             return all_bytes_read
-        num_bytes_to_read_remaining = total_num_bytes_to_read
         last_bytes_read = None
         while last_bytes_read is None or (len(last_bytes_read) > 0 and len(all_bytes_read) < total_num_bytes_to_read):
-            last_bytes_read = f.read(num_bytes_to_read_remaining)
-            num_bytes_to_read_remaining -= len(last_bytes_read)
+            last_bytes_read = f.read(total_num_bytes_to_read - len(all_bytes_read))
             if len(last_bytes_read) == 0:
                 raise NoMorePackets
             else:
