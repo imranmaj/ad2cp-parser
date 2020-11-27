@@ -4,15 +4,19 @@
 
 # https://support.nortekgroup.com/hc/en-us/articles/360029513952-Integrators-Guide-Signature
 
-from typing import BinaryIO, Tuple, Union, Callable, List, Optional
+from typing import BinaryIO, Tuple, Union, Callable, List, Optional, Any
 from enum import Enum, unique, auto
 import struct
+import math
+
+import numpy as np
 
 
 @unique
 class BurstAverageDataRecordVersion(Enum):
     VERSION2 = auto()  # Burst/Average Data Record Definition (DF2)
     VERSION3 = auto()  # Burst/Average Data Record Definition (DF3)
+
 
 @unique
 class DataRecordType(Enum):
@@ -21,31 +25,39 @@ class DataRecordType(Enum):
     BOTTOM_TRACK = auto()
     STRING = auto()
 
+
 @unique
 class DataType(Enum):
     SIGNED_INTEGER = auto()
     UNSIGNED_INTEGER = auto()
     RAW_BYTES = auto()
     FLOAT = auto()
+    # TODO: figure out what this is in binary
+    SIGNED_FRACTION = auto()
 
 
 SIGNED_INTEGER = DataType.SIGNED_INTEGER
 UNSIGNED_INTEGER = DataType.UNSIGNED_INTEGER
 RAW_BYTES = DataType.RAW_BYTES
 FLOAT = DataType.FLOAT
+SIGNED_FRACTION = DataType.SIGNED_FRACTION
 
-# name of the field
+# Name of the field
 type_field_name = Optional[str]
-# size of the field in bytes. Can be a predicate
-type_field_size_bytes = Union[int, Callable[["Ad2cpDataPacket"], int]]
-# whether the field is signed. If None, it is kept as bytes instead of int
+# Size of each entry in the field in bytes.
+# If the shape of the field is [], then it is the size of the entire field.
+# Can be a function
+type_field_entry_size_bytes = Union[int, Callable[["Ad2cpDataPacket"], int]]
+# Shape of the entries in the field. Can be a function
+type_field_shape = Union[List[int], Callable[["Ad2cpDataPacket"], List[int]]]
+# Type of each entry
 type_field_data_type = DataType
-# predicate to determine whether the field should exist at all
+# Optional predicate to determine whether the field exists at all
 type_predicate = Callable[["Ad2cpDataPacket"], bool]
 type_without_predicate_field = Tuple[type_field_name,
-                                     type_field_size_bytes, type_field_data_type]
+                                     type_field_entry_size_bytes, type_field_data_type, type_field_shape]
 type_with_predicate_field = Tuple[type_field_name,
-                                  type_field_size_bytes, type_field_data_type, type_predicate]
+                                  type_field_entry_size_bytes, type_field_data_type, type_field_shape, type_predicate]
 type_field = Union[type_without_predicate_field, type_with_predicate_field]
 
 
@@ -131,38 +143,60 @@ class Ad2cpDataPacket:
 
         raw_bytes = bytes()  # combination of all raw fields
         for field_format in data_format:
-            if len(field_format) == 3:
-                field_name, field_size_bytes, field_signed = field_format
-            elif len(field_format) == 4:
-                field_name, field_size_bytes, field_signed, predicate = field_format
+            if len(field_format) == 4:
+                field_name, field_entry_size_bytes, field_data_type, field_shape = field_format
+            elif len(field_format) == 5:
+                field_name, field_entry_size_bytes, field_data_type, field_shape, predicate = field_format
                 if not predicate(self):
                     continue
             else:
                 # unreachable
                 raise RuntimeError
-            if callable(field_size_bytes):
-                field_size_bytes = field_size_bytes(self)
+            if callable(field_entry_size_bytes):
+                field_entry_size_bytes = field_entry_size_bytes(self)
+            if callable(field_shape):
+                field_shape = field_shape(self)
 
-            raw_field = self._read_exact(f, field_size_bytes)
+            raw_field = self._read_exact(f, field_entry_size_bytes * math.prod(field_shape))
             raw_bytes += raw_field
-            # all numbers are little endian
-            if field_signed == DataType.RAW_BYTES:
-                field_value = raw_field
-            elif field_signed == DataType.SIGNED_INTEGER:
-                field_value = int.from_bytes(
-                    raw_field, byteorder="little", signed=True)
-            elif field_signed == DataType.UNSIGNED_INTEGER:
-                field_value = int.from_bytes(
-                    raw_field, byteorder="little", signed=False)
-            elif field_signed == DataType.FLOAT and field_size_bytes == 4:
-                field_value = struct.unpack("f", raw_field)
-            elif field_signed == DataType.FLOAT and field_size_bytes == 8:
-                field_value = struct.unpack("d", raw_field)
+            if len(field_shape) == 0:
+                parsed_field = self.parse(raw_field, field_data_type)
+            else:
+                raw_field_entries = [raw_field[i * field_entry_size_bytes:(
+                    i + 1) * field_entry_size_bytes] for i in range(np.prod(field_shape))]
+                parsed_field_entries = [self.parse(raw_field_entry, field_data_type) for raw_field_entry in raw_field_entries]
+                parsed_field = np.reshape(parsed_field_entries, field_shape)
             if field_name is not None:
-                setattr(self, field_name, field_value)
+                setattr(self, field_name, parsed_field)
                 self._postprocess(field_name)
 
         return raw_bytes
+
+    @staticmethod
+    def parse(value: bytes, data_type: DataType) -> Any:
+        """
+        Parses raw bytes into a value given its data type
+        """
+
+        # all numbers are little endian
+        if data_type == DataType.RAW_BYTES:
+            return value
+        elif data_type == DataType.SIGNED_INTEGER:
+            return int.from_bytes(
+                value, byteorder="little", signed=True)
+        elif data_type == DataType.UNSIGNED_INTEGER:
+            return int.from_bytes(
+                value, byteorder="little", signed=False)
+        elif data_type == DataType.FLOAT and len(value) == 4:
+            return struct.unpack("f", value)
+        elif data_type == DataType.FLOAT and len(value) == 8:
+            return struct.unpack("d", value)
+        elif data_type == DataType.SIGNED_FRACTION:
+            # TODO: ??????
+            pass
+        else:
+            # unreachable
+            raise RuntimeError
 
     @staticmethod
     def _read_exact(f: BinaryIO, total_num_bytes_to_read: int) -> bytes:
@@ -176,7 +210,8 @@ class Ad2cpDataPacket:
             return all_bytes_read
         last_bytes_read = None
         while last_bytes_read is None or (len(last_bytes_read) > 0 and len(all_bytes_read) < total_num_bytes_to_read):
-            last_bytes_read = f.read(total_num_bytes_to_read - len(all_bytes_read))
+            last_bytes_read = f.read(
+                total_num_bytes_to_read - len(all_bytes_read))
             if len(last_bytes_read) == 0:
                 raise NoMorePackets
             else:
@@ -231,9 +266,10 @@ class Ad2cpDataPacket:
                         self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
             elif field_name == "ambiguity_velocity_or_echo_sounder_frequency":
                 if self.echo_sounder_data_included:
-                    # TODO: this is listed in the table as "echo sounder frequency", but the description
+                    # This is specified as "echo sounder frequency", but the description technically
                     # says "number of echo sounder cells". It is probably the frequency and not the number of cells
-                    #  because the number of cells is already listed under "num_beams_and_coordinate_system_and_num_cells"
+                    # because the number of cells already replaces the data in "num_beams_and_coordinate_system_and_num_cells"
+                    # when an echo sounder is present
                     self.echo_sounder_frequency = self.ambiguity_velocity_or_echo_sounder_frequency
                 else:
                     self.ambiguity_velocity = self.ambiguity_velocity_or_echo_sounder_frequency
@@ -270,263 +306,286 @@ class Ad2cpDataPacket:
 
     # data formats (passed to self._read_data)
     HEADER_FORMAT: List[type_field] = [
-        ("sync", 1, UNSIGNED_INTEGER),
-        ("header_size", 1, UNSIGNED_INTEGER),
-        ("id", 1, UNSIGNED_INTEGER),
-        ("family", 1, UNSIGNED_INTEGER),
-        ("data_record_size", 2, UNSIGNED_INTEGER),
-        ("data_record_checksum", 2, UNSIGNED_INTEGER),
-        ("header_checksum", 2, UNSIGNED_INTEGER),
+        ("sync", 1, UNSIGNED_INTEGER, []),
+        ("header_size", 1, UNSIGNED_INTEGER, []),
+        ("id", 1, UNSIGNED_INTEGER, []),
+        ("family", 1, UNSIGNED_INTEGER, []),
+        ("data_record_size", 2, UNSIGNED_INTEGER, []),
+        ("data_record_checksum", 2, UNSIGNED_INTEGER, []),
+        ("header_checksum", 2, UNSIGNED_INTEGER, []),
     ]
     STRING_DATA_RECORD_FORMAT: List[type_field] = [
-        ("string_data_id", 1, RAW_BYTES),
-        ("string_data", lambda self: self.data_record_size - 1, RAW_BYTES)
+        ("string_data_id", 1, UNSIGNED_INTEGER, []),
+        ("string_data", lambda self: self.data_record_size - 1, RAW_BYTES, []),
     ]
     BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT: List[type_field] = [
-        ("version", 1, UNSIGNED_INTEGER),
-        ("offset_of_data", 1, UNSIGNED_INTEGER),
-        ("serial_number", 4, UNSIGNED_INTEGER),
-        ("configuration", 2, UNSIGNED_INTEGER),
-        ("year", 1, UNSIGNED_INTEGER),
-        ("month", 1, UNSIGNED_INTEGER),
-        ("day", 1, UNSIGNED_INTEGER),
-        ("hour", 1, UNSIGNED_INTEGER),
-        ("minute", 1, UNSIGNED_INTEGER),
-        ("seconds", 1, UNSIGNED_INTEGER),
-        ("microsec100", 2, UNSIGNED_INTEGER),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER),
-        ("temperature", 2, SIGNED_INTEGER),
-        ("pressure", 4, UNSIGNED_INTEGER),
-        ("heading", 2, UNSIGNED_INTEGER),
-        ("pitch", 2, SIGNED_INTEGER),
-        ("roll", 2, SIGNED_INTEGER),
-        ("error", 2, UNSIGNED_INTEGER),
-        ("status", 2, UNSIGNED_INTEGER),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
-        ("cell_size", 2, UNSIGNED_INTEGER),
-        ("blanking", 2, UNSIGNED_INTEGER),
-        ("velocity_range", 2, UNSIGNED_INTEGER),
-        ("battery_voltage", 2, UNSIGNED_INTEGER),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("ambiguity_velocity", 2, UNSIGNED_INTEGER),
-        ("dataset_description", 2, UNSIGNED_INTEGER),
-        ("transmit_energy", 2, UNSIGNED_INTEGER),
-        ("velocity_scaling", 1, SIGNED_INTEGER),
-        ("power_level", 1, SIGNED_INTEGER),
-        (None, 4, UNSIGNED_INTEGER),
-        # TODO: this data is interpreted as raw bytes instead of integers
-        # because it actually contains a large series of integers. The raw bytes
-        # need to be split into integers during postprocessing
+        ("version", 1, UNSIGNED_INTEGER, []),
+        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
+        ("serial_number", 4, UNSIGNED_INTEGER, []),
+        ("configuration", 2, UNSIGNED_INTEGER, []),
+        ("year", 1, UNSIGNED_INTEGER, []),
+        ("month", 1, UNSIGNED_INTEGER, []),
+        ("day", 1, UNSIGNED_INTEGER, []),
+        ("hour", 1, UNSIGNED_INTEGER, []),
+        ("minute", 1, UNSIGNED_INTEGER, []),
+        ("seconds", 1, UNSIGNED_INTEGER, []),
+        ("microsec100", 2, UNSIGNED_INTEGER, []),
+        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
+        ("temperature", 2, SIGNED_INTEGER, []),
+        ("pressure", 4, UNSIGNED_INTEGER, []),
+        ("heading", 2, UNSIGNED_INTEGER, []),
+        ("pitch", 2, SIGNED_INTEGER, []),
+        ("roll", 2, SIGNED_INTEGER, []),
+        ("error", 2, UNSIGNED_INTEGER, []),
+        ("status", 2, UNSIGNED_INTEGER, []),
+        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
+        ("cell_size", 2, UNSIGNED_INTEGER, []),
+        ("blanking", 2, UNSIGNED_INTEGER, []),
+        ("velocity_range", 2, UNSIGNED_INTEGER, []),
+        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
+        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("ambiguity_velocity", 2, UNSIGNED_INTEGER, []),
+        ("dataset_description", 2, UNSIGNED_INTEGER, []),
+        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
+        ("velocity_scaling", 1, SIGNED_INTEGER, []),
+        ("power_level", 1, SIGNED_INTEGER, []),
+        (None, 4, UNSIGNED_INTEGER, []),
         (
             "velocity_data",
-            lambda self: self.num_beams * self.num_cells * 2,
-            RAW_BYTES,
+            2,
+            SIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.velocity_data_included
         ),
         (
             "amplitude_data",
-            lambda self: self.num_beams * self.num_cells * 1,
-            RAW_BYTES,
+            1,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.amplitude_data_included
         ),
         (
             "correlation_data",
-            lambda self: self.num_beams * self.num_cells * 1,
-            RAW_BYTES,
+            1,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.correlation_data_included
         )
     ]
-    BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT = [
-        ("version", 1, UNSIGNED_INTEGER),
-        ("offset_of_data", 1, UNSIGNED_INTEGER),
-        ("configuration", 2, UNSIGNED_INTEGER),
-        ("serial_number", 4, UNSIGNED_INTEGER),
-        ("year", 1, UNSIGNED_INTEGER),
-        ("month", 1, UNSIGNED_INTEGER),
-        ("day", 1, UNSIGNED_INTEGER),
-        ("hour", 1, UNSIGNED_INTEGER),
-        ("minute", 1, UNSIGNED_INTEGER),
-        ("seconds", 1, UNSIGNED_INTEGER),
-        ("microsec100", 2, UNSIGNED_INTEGER),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER),
-        ("temperature", 2, SIGNED_INTEGER),
-        ("pressure", 4, UNSIGNED_INTEGER),
-        ("heading", 2, UNSIGNED_INTEGER),
-        ("pitch", 2, SIGNED_INTEGER),
-        ("roll", 2, SIGNED_INTEGER),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
-        ("cell_size", 2, UNSIGNED_INTEGER),
-        ("blanking", 2, UNSIGNED_INTEGER),
-        ("nominal_correlation", 1, UNSIGNED_INTEGER),
-        ("temperature_from_pressure_sensor", 1, UNSIGNED_INTEGER),
-        ("battery_voltage", 2, UNSIGNED_INTEGER),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("ambiguity_velocity_or_echo_sounder_frequency", 2, UNSIGNED_INTEGER),
-        ("dataset_description", 2, UNSIGNED_INTEGER),
-        ("transmit_energy", 2, UNSIGNED_INTEGER),
-        ("velocity_scaling", 1, SIGNED_INTEGER),
-        ("power_level", 1, SIGNED_INTEGER),
-        ("magnetometer_temperature", 2, SIGNED_INTEGER),
-        ("real_time_clock_temperature", 2, SIGNED_INTEGER),
-        ("error", 2, UNSIGNED_INTEGER),
-        ("status0", 2, UNSIGNED_INTEGER),
-        ("status", 4, UNSIGNED_INTEGER),
-        ("ensemble_counter", 4, UNSIGNED_INTEGER),
+    BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT: List[type_field] = [
+        ("version", 1, UNSIGNED_INTEGER, []),
+        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
+        ("configuration", 2, UNSIGNED_INTEGER, []),
+        ("serial_number", 4, UNSIGNED_INTEGER, []),
+        ("year", 1, UNSIGNED_INTEGER, []),
+        ("month", 1, UNSIGNED_INTEGER, []),
+        ("day", 1, UNSIGNED_INTEGER, []),
+        ("hour", 1, UNSIGNED_INTEGER, []),
+        ("minute", 1, UNSIGNED_INTEGER, []),
+        ("seconds", 1, UNSIGNED_INTEGER, []),
+        ("microsec100", 2, UNSIGNED_INTEGER, []),
+        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
+        ("temperature", 2, SIGNED_INTEGER, []),
+        ("pressure", 4, UNSIGNED_INTEGER, []),
+        ("heading", 2, UNSIGNED_INTEGER, []),
+        ("pitch", 2, SIGNED_INTEGER, []),
+        ("roll", 2, SIGNED_INTEGER, []),
+        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
+        ("cell_size", 2, UNSIGNED_INTEGER, []),
+        ("blanking", 2, UNSIGNED_INTEGER, []),
+        ("nominal_correlation", 1, UNSIGNED_INTEGER, []),
+        ("temperature_from_pressure_sensor", 1, UNSIGNED_INTEGER, []),
+        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
+        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("ambiguity_velocity_or_echo_sounder_frequency", 2, UNSIGNED_INTEGER, []),
+        ("dataset_description", 2, UNSIGNED_INTEGER, []),
+        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
+        ("velocity_scaling", 1, SIGNED_INTEGER, []),
+        ("power_level", 1, SIGNED_INTEGER, []),
+        ("magnetometer_temperature", 2, SIGNED_INTEGER, []),
+        ("real_time_clock_temperature", 2, SIGNED_INTEGER, []),
+        ("error", 2, UNSIGNED_INTEGER, []),
+        ("status0", 2, UNSIGNED_INTEGER, []),
+        ("status", 4, UNSIGNED_INTEGER, []),
+        ("ensemble_counter", 4, UNSIGNED_INTEGER, []),
         (
             "velocity_data",
-            lambda self: self.num_beams * self.num_cells * 2,
-            RAW_BYTES,
+            2,
+            SIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.velocity_data_included
         ),
         (
             "amplitude_data",
-            lambda self: self.num_beams * self.num_cells * 1,
-            RAW_BYTES,
+            1,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.amplitude_data_included
         ),
         (
             "correlation_data",
-            lambda self: self.num_beams * self.num_cells * 1,
-            RAW_BYTES,
+            1,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_beams, self.num_cells],
             lambda self: self.correlation_data_included
         ),
-        ("altimiter_distance", 4, FLOAT, lambda self: self.altimiter_data_included),
-        ("altimiter_quality", 2, UNSIGNED_INTEGER,
+        ("altimiter_distance", 4, FLOAT, [],
          lambda self: self.altimiter_data_included),
-        ("ast_distance", 4, FLOAT, lambda self: self.ast_data_included),
-        ("ast_quality", 2, UNSIGNED_INTEGER, lambda self: self.ast_data_included),
-        ("ast_offset_10us", 2, SIGNED_INTEGER,
+        ("altimiter_quality", 2, UNSIGNED_INTEGER, [],
+         lambda self: self.altimiter_data_included),
+        ("ast_distance", 4, FLOAT, [], lambda self: self.ast_data_included),
+        ("ast_quality", 2, UNSIGNED_INTEGER, [],
          lambda self: self.ast_data_included),
-        ("ast_pressure", 4, FLOAT, lambda self: self.ast_data_included),
-        ("altimiter_spare", 8, RAW_BYTES, lambda self: self.ast_data_included),
+        ("ast_offset_10us", 2, SIGNED_INTEGER, [],
+         lambda self: self.ast_data_included),
+        ("ast_pressure", 4, FLOAT, [], lambda self: self.ast_data_included),
+        ("altimiter_spare", 1, RAW_BYTES, [8], lambda self: self.ast_data_included
+         ),
         (
             "altimiter_raw_data_num_samples",
-            # TODO: other counts, like the number of beams or number of cells, can be found
-            # by parsing the data itself, but it seems like the number of altimiter samples
-            # must be known beforehand. Is there a way to calculate this instead?
-            lambda self: self.number_of_altimiter_samples * 2,
-            RAW_BYTES,
+            # The field size of this field is technically specified as number of samples * 2,
+            # but seeing as the field is called "num samples," and the field which is supposed
+            # to contain the samples is specified as having a constant size of 2, these fields
+            # sizes were likely incorrectly swapped.
+            2,
+            UNSIGNED_INTEGER,
+            [],
             lambda self: self.altimiter_raw_data_included
         ),
-        ("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER,
+        ("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER, [],
          lambda self: self.altimiter_raw_data_included),
-        ("altimiter_raw_data_samples", lambda self: 2, RAW_BYTES,
-         lambda self: self.altimiter_raw_data_included),
+        (
+            "altimiter_raw_data_samples",
+            2,
+            SIGNED_FRACTION,
+            lambda self: [self.altimiter_raw_data_num_samples],
+            lambda self: self.altimiter_raw_data_included,
+        ),
         (
             "echo_sounder_data",
-            lambda self: self.num_cells * 2,
-            RAW_BYTES,
+            2,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_cells],
             lambda self: self.echo_sounder_data_included
         ),
-        ("ahrs_rotation_matrix_m11", 4, FLOAT,
+        # ("ahrs_rotation_matrix_m11", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m12", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m13", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m21", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m22", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m23", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m31", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m32", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        # ("ahrs_rotation_matrix_m33", 4, FLOAT, [],
+        #  lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix", 4, FLOAT, [
+         3, 3], lambda self: self.ahrs_data_included),
+        # ("ahrs_quaternions_w", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        # ("ahrs_quaternions_x", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        # ("ahrs_quaternions_y", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        # ("ahrs_quaternions_z", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        ("ahrs_quaternions", 4, FLOAT, [4],
          lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m12", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m13", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m21", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m22", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m23", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m31", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m32", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m33", 4, FLOAT,
-         lambda self: self.ahrs_data_included),
-        ("ahrs_quaternions_w", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_quaternions_x", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_quaternions_y", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_quaternions_z", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_gyro_x", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_gyro_y", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_gyro_z", 4, FLOAT, lambda self: self.ahrs_data_included),
+        # ("ahrs_gyro_x", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        # ("ahrs_gyro_y", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        # ("ahrs_gyro_z", 4, FLOAT, [], lambda self: self.ahrs_data_included),
+        ("ahrs_gyro", 4, FLOAT, [3], lambda self: self.ahrs_data_included),
         (
             "percentage_good_data",
-            lambda self: self.num_cells,
+            1,
             UNSIGNED_INTEGER,
+            lambda self: [self.num_cells],
             lambda self: self.percentage_good_data_included
         ),
         # only the pitch field is labeled as included when the "std dev data included"
         # bit is set, but this is likely a mistake
-        ("std_dev_pitch", 2, SIGNED_INTEGER,
+        ("std_dev_pitch", 2, SIGNED_INTEGER, [],
          lambda self: self.std_dev_data_included),
-        ("std_dev_roll", 2, SIGNED_INTEGER,
+        ("std_dev_roll", 2, SIGNED_INTEGER, [],
          lambda self: self.std_dev_data_included),
-        ("std_dev_heading", 2, SIGNED_INTEGER,
+        ("std_dev_heading", 2, SIGNED_INTEGER, [],
          lambda self: self.std_dev_data_included),
-        ("std_dev_pressure", 2, SIGNED_INTEGER,
+        ("std_dev_pressure", 2, SIGNED_INTEGER, [],
          lambda self: self.std_dev_data_included),
-        (None, 24, RAW_BYTES, lambda self: self.std_dev_data_included)
+        (None, 24, RAW_BYTES, [], lambda self: self.std_dev_data_included)
     ]
-    BOTTOM_TRACK_DATA_RECORD_FORMAT = [
-        ("version", 1, UNSIGNED_INTEGER),
-        ("offset_of_data", 1, UNSIGNED_INTEGER),
-        ("configuration", 2, UNSIGNED_INTEGER),
-        ("serial_number", 4, UNSIGNED_INTEGER),
-        ("year", 1, UNSIGNED_INTEGER),
-        ("month", 1, UNSIGNED_INTEGER),
-        ("day", 1, UNSIGNED_INTEGER),
-        ("hour", 1, UNSIGNED_INTEGER),
-        ("minute", 1, UNSIGNED_INTEGER),
-        ("seconds", 1, UNSIGNED_INTEGER),
-        ("microsec100", 2, UNSIGNED_INTEGER),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER),
-        ("temperature", 2, SIGNED_INTEGER),
-        ("pressure", 4, UNSIGNED_INTEGER),
-        ("heading", 2, UNSIGNED_INTEGER),
-        ("pitch", 2, SIGNED_INTEGER),
-        ("roll", 2, SIGNED_INTEGER),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
-        ("cell_size", 2, UNSIGNED_INTEGER),
-        ("blanking", 2, UNSIGNED_INTEGER),
-        ("nominal_correlation", 1, UNSIGNED_INTEGER),
-        (None, 1, RAW_BYTES),
-        ("battery_voltage", 2, UNSIGNED_INTEGER),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
-        ("ambiguity_velocity", 4, UNSIGNED_INTEGER),
-        ("dataset_description", 2, UNSIGNED_INTEGER),
-        ("transmit_energy", 2, UNSIGNED_INTEGER),
-        ("velocity_scaling", 1, SIGNED_INTEGER),
-        ("power_level", 1, SIGNED_INTEGER),
-        ("magnetometer_temperature", 2, SIGNED_INTEGER),
-        ("real_time_clock_temperature", 2, SIGNED_INTEGER),
-        ("error", 4, UNSIGNED_INTEGER),
-        ("status", 4, UNSIGNED_INTEGER),
-        ("ensemble_counter", 4, UNSIGNED_INTEGER),
+    BOTTOM_TRACK_DATA_RECORD_FORMAT: List[type_field] = [
+        ("version", 1, UNSIGNED_INTEGER, []),
+        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
+        ("configuration", 2, UNSIGNED_INTEGER, []),
+        ("serial_number", 4, UNSIGNED_INTEGER, []),
+        ("year", 1, UNSIGNED_INTEGER, []),
+        ("month", 1, UNSIGNED_INTEGER, []),
+        ("day", 1, UNSIGNED_INTEGER, []),
+        ("hour", 1, UNSIGNED_INTEGER, []),
+        ("minute", 1, UNSIGNED_INTEGER, []),
+        ("seconds", 1, UNSIGNED_INTEGER, []),
+        ("microsec100", 2, UNSIGNED_INTEGER, []),
+        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
+        ("temperature", 2, SIGNED_INTEGER, []),
+        ("pressure", 4, UNSIGNED_INTEGER, []),
+        ("heading", 2, UNSIGNED_INTEGER, []),
+        ("pitch", 2, SIGNED_INTEGER, []),
+        ("roll", 2, SIGNED_INTEGER, []),
+        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
+        ("cell_size", 2, UNSIGNED_INTEGER, []),
+        ("blanking", 2, UNSIGNED_INTEGER, []),
+        ("nominal_correlation", 1, UNSIGNED_INTEGER, []),
+        (None, 1, RAW_BYTES, []),
+        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
+        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
+        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
+        ("ambiguity_velocity", 4, UNSIGNED_INTEGER, []),
+        ("dataset_description", 2, UNSIGNED_INTEGER, []),
+        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
+        ("velocity_scaling", 1, SIGNED_INTEGER, []),
+        ("power_level", 1, SIGNED_INTEGER, []),
+        ("magnetometer_temperature", 2, SIGNED_INTEGER, []),
+        ("real_time_clock_temperature", 2, SIGNED_INTEGER, []),
+        ("error", 4, UNSIGNED_INTEGER, []),
+        ("status", 4, UNSIGNED_INTEGER, []),
+        ("ensemble_counter", 4, UNSIGNED_INTEGER, []),
         (
             "velocity_data",
-            lambda self: self.num_beams * 4,
-            RAW_BYTES,
+            4,
+            SIGNED_INTEGER,
+            lambda self: [self.num_beams],
             lambda self: self.velocity_data_included
         ),
         (
             "distance_data",
-            lambda self: self.num_beams * 4,
-            RAW_BYTES,
+            4,
+            SIGNED_INTEGER,
+            lambda self: [self.num_beams],
             lambda self: self.distance_data_included
         ),
         (
             "figure_of_merit_data",
-            lambda self: self.num_beams * 2,
-            RAW_BYTES,
+            2,
+            UNSIGNED_INTEGER,
+            lambda self: [self.num_beams],
             lambda self: self.figure_of_merit_data_included
         )
     ]
@@ -539,3 +598,6 @@ if __name__ == "__main__":
 
     # for packet in reader.packets:
     #     print(packet.__dict__)
+    for packet in reader.packets:
+        if hasattr(packet, "velocity_data"):
+            print(packet.velocity_data)
