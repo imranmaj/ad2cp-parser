@@ -65,7 +65,7 @@ class Ad2cpReader:
                 break
             else:
                 counter += 1
-                print(f"finished reading record #{counter}", end="\n\n")
+                print(f"finished reading packet #{counter}", end="\n\n")
         print(f"successfully found and read {len(self.packets)} packets")
 
 
@@ -113,7 +113,7 @@ class Ad2cpDataPacket:
         Reads the data record part of the AD2CP packet from the stream
         """
 
-        print("data record id:", self.id)
+        print("data record type id:", self.id)
         # TODO: figure out where to send the other ids
         if self.id in (0x15, 0x16, 0x18, ):  # burst/average
             if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
