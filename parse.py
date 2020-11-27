@@ -4,7 +4,7 @@
 
 # https://support.nortekgroup.com/hc/en-us/articles/360029513952-Integrators-Guide-Signature
 
-from typing import TextIO, Tuple, Union, Callable, List, Optional
+from typing import BinaryIO, Tuple, Union, Callable, List, Optional
 from enum import Enum, unique, auto
 import struct
 
@@ -54,7 +54,7 @@ class NoMorePackets(Exception):
 
 
 class Ad2cpReader:
-    def __init__(self, f: TextIO, data_record_format_type: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3, number_of_altimiter_samples: int = 0):
+    def __init__(self, f: BinaryIO, data_record_format_type: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3, number_of_altimiter_samples: int = 0):
         self.packets = []
         counter = 0
         while True:
@@ -70,7 +70,7 @@ class Ad2cpReader:
 
 
 class Ad2cpDataPacket:
-    def __init__(self, f: TextIO, burst_average_data_record_version: BurstAverageDataRecordVersion, number_of_altimiter_samples: int):
+    def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion, number_of_altimiter_samples: int):
         self.burst_average_data_record_version = burst_average_data_record_version
         self.number_of_altimiter_samples = number_of_altimiter_samples
         self.data_record_type: Optional[DataRecordType] = None
@@ -78,7 +78,7 @@ class Ad2cpDataPacket:
         self._read_data_record(f)
 
     @staticmethod
-    def _read_exact(f: TextIO, total_num_bytes_to_read: int) -> bytes:
+    def _read_exact(f: BinaryIO, total_num_bytes_to_read: int) -> bytes:
         """
         Drives a stream until an exact amount of bytes is read from it.
         This is necessary because a single read may not return the correct number of bytes.
@@ -96,7 +96,7 @@ class Ad2cpDataPacket:
                 all_bytes_read += last_bytes_read
         return all_bytes_read
 
-    def _read_header(self, f: TextIO):
+    def _read_header(self, f: BinaryIO):
         """
         Reads the header part of the AD2CP packet from the stream
         """
@@ -108,7 +108,7 @@ class Ad2cpDataPacket:
         assert self.checksum(
             raw_header[: -2]) == self.header_checksum, "invalid header checksum"
 
-    def _read_data_record(self, f: TextIO):
+    def _read_data_record(self, f: BinaryIO):
         """
         Reads the data record part of the AD2CP packet from the stream
         """
@@ -143,7 +143,7 @@ class Ad2cpDataPacket:
         assert self.checksum(
             raw_data_record) == self.data_record_checksum, "invalid data record checksum"
 
-    def _read_data(self, f: TextIO, data_format: List[type_field]) -> bytes:
+    def _read_data(self, f: BinaryIO, data_format: List[type_field]) -> bytes:
         """
         Reads data from the stream, interpreting the data using the given format
         """
