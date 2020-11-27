@@ -66,13 +66,12 @@ class NoMorePackets(Exception):
 
 
 class Ad2cpReader:
-    def __init__(self, f: BinaryIO, data_record_format_type: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3, number_of_altimiter_samples: int = 0):
+    def __init__(self, f: BinaryIO, data_record_format_type: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3):
         self.packets = []
         counter = 0
         while True:
             try:
-                self.packets.append(Ad2cpDataPacket(
-                    f, data_record_format_type, number_of_altimiter_samples))
+                self.packets.append(Ad2cpDataPacket(f, data_record_format_type))
             except NoMorePackets:
                 break
             else:
@@ -82,9 +81,8 @@ class Ad2cpReader:
 
 
 class Ad2cpDataPacket:
-    def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion, number_of_altimiter_samples: int):
+    def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion):
         self.burst_average_data_record_version = burst_average_data_record_version
-        self.number_of_altimiter_samples = number_of_altimiter_samples
         self.data_record_type: Optional[DataRecordType] = None
         self._read_header(f)
         self._read_data_record(f)
@@ -157,14 +155,16 @@ class Ad2cpDataPacket:
             if callable(field_shape):
                 field_shape = field_shape(self)
 
-            raw_field = self._read_exact(f, field_entry_size_bytes * math.prod(field_shape))
+            raw_field = self._read_exact(
+                f, field_entry_size_bytes * math.prod(field_shape))
             raw_bytes += raw_field
             if len(field_shape) == 0:
-                parsed_field = self.parse(raw_field, field_data_type)
+                parsed_field = self._parse(raw_field, field_data_type)
             else:
                 raw_field_entries = [raw_field[i * field_entry_size_bytes:(
                     i + 1) * field_entry_size_bytes] for i in range(np.prod(field_shape))]
-                parsed_field_entries = [self.parse(raw_field_entry, field_data_type) for raw_field_entry in raw_field_entries]
+                parsed_field_entries = [self._parse(
+                    raw_field_entry, field_data_type) for raw_field_entry in raw_field_entries]
                 parsed_field = np.reshape(parsed_field_entries, field_shape)
             if field_name is not None:
                 setattr(self, field_name, parsed_field)
@@ -173,7 +173,7 @@ class Ad2cpDataPacket:
         return raw_bytes
 
     @staticmethod
-    def parse(value: bytes, data_type: DataType) -> Any:
+    def _parse(value: bytes, data_type: DataType) -> Any:
         """
         Parses raw bytes into a value given its data type
         """
@@ -598,6 +598,6 @@ if __name__ == "__main__":
 
     # for packet in reader.packets:
     #     print(packet.__dict__)
-    for packet in reader.packets:
-        if hasattr(packet, "velocity_data"):
-            print(packet.velocity_data)
+    # for packet in reader.packets:
+    #     if hasattr(packet, "velocity_data"):
+    #         print(packet.velocity_data)
