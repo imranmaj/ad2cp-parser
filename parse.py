@@ -1,3 +1,7 @@
+# Example usage (run from command line):
+# python parse.py input.ad2cp
+
+
 # https://support.nortekgroup.com/hc/en-us/articles/360029513952-Integrators-Guide-Signature
 
 from typing import TextIO, Tuple, Union, Callable, List, Optional
@@ -57,6 +61,7 @@ class Ad2cpReader:
                 counter += 1
                 print(f"finished reading record #{counter}", end="\n\n")
         print(f"successfully found and read {len(self.packets)} packets")
+
 
 class Ad2cpDataPacket:
     def __init__(self, f: TextIO, burst_average_data_record_version: BurstAverageDataRecordVersion, number_of_altimiter_samples: int):
@@ -169,6 +174,11 @@ class Ad2cpDataPacket:
         return raw_bytes
 
     def _postprocess(self, field_name):
+        """
+        Calculates values based on parsed data. This should be called immediately after
+        parsing each field in a data record.
+        """
+
         if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
             if field_name == "configuration":
                 self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
@@ -221,9 +231,9 @@ class Ad2cpDataPacket:
     @staticmethod
     def checksum(data: bytes) -> int:
         """
-        The Checksum is defined as a 16-bits unsigned sum of the data (16 bits). The sum shall be
-        initialized to the value of 0xB58C before the checksum is calculated.
+        Computes the checksum for the given data
         """
+
         checksum = 0xb58c
         for i in range(0, len(data), 2):
             checksum += int.from_bytes(data[i: i + 2], byteorder="little")
@@ -390,15 +400,24 @@ class Ad2cpDataPacket:
             RAW_BYTES,
             lambda self: self.echo_sounder_data_included
         ),
-        ("ahrs_rotation_matrix_m11", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m12", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m13", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m21", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m22", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m23", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m31", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m32", 4, FLOAT, lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix_m33", 4, FLOAT, lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m11", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m12", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m13", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m21", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m22", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m23", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m31", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m32", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m33", 4, FLOAT,
+         lambda self: self.ahrs_data_included),
         ("ahrs_quaternions_w", 4, FLOAT, lambda self: self.ahrs_data_included),
         ("ahrs_quaternions_x", 4, FLOAT, lambda self: self.ahrs_data_included),
         ("ahrs_quaternions_y", 4, FLOAT, lambda self: self.ahrs_data_included),
@@ -414,10 +433,14 @@ class Ad2cpDataPacket:
         ),
         # only the pitch field is labeled as included when the "std dev data included"
         # bit is set, but this is likely a mistake
-        ("std_dev_pitch", 2, SIGNED_INTEGER, lambda self: self.std_dev_data_included),
-        ("std_dev_roll", 2, SIGNED_INTEGER, lambda self: self.std_dev_data_included),
-        ("std_dev_heading", 2, SIGNED_INTEGER, lambda self: self.std_dev_data_included),
-        ("std_dev_pressure", 2, SIGNED_INTEGER, lambda self: self.std_dev_data_included),
+        ("std_dev_pitch", 2, SIGNED_INTEGER,
+         lambda self: self.std_dev_data_included),
+        ("std_dev_roll", 2, SIGNED_INTEGER,
+         lambda self: self.std_dev_data_included),
+        ("std_dev_heading", 2, SIGNED_INTEGER,
+         lambda self: self.std_dev_data_included),
+        ("std_dev_pressure", 2, SIGNED_INTEGER,
+         lambda self: self.std_dev_data_included),
         (None, 24, RAW_BYTES, lambda self: self.std_dev_data_included)
     ]
     BOTTOM_TRACK_DATA_RECORD_FORMAT = [
