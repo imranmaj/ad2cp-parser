@@ -71,7 +71,8 @@ class Ad2cpReader:
         counter = 0
         while True:
             try:
-                self.packets.append(Ad2cpDataPacket(f, data_record_format_type))
+                self.packets.append(Ad2cpDataPacket(
+                    f, data_record_format_type))
             except NoMorePackets:
                 break
             else:
@@ -84,6 +85,7 @@ class Ad2cpDataPacket:
     def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion):
         self.burst_average_data_record_version = burst_average_data_record_version
         self.data_record_type: Optional[DataRecordType] = None
+        self.data = dict()
         self._read_header(f)
         self._read_data_record(f)
 
@@ -94,19 +96,19 @@ class Ad2cpDataPacket:
 
         raw_header = self._read_data(f, self.HEADER_FORMAT)
         print("header checksum      calculated:", self.checksum(
-            raw_header[: -2]), "expected:", self.header_checksum)
+            raw_header[: -2]), "expected:", self.data["header_checksum"])
         # don't include the last 2 bytes, which is the header checksum itself
         assert self.checksum(
-            raw_header[: -2]) == self.header_checksum, "invalid header checksum"
+            raw_header[: -2]) == self.data["header_checksum"], "invalid header checksum"
 
     def _read_data_record(self, f: BinaryIO):
         """
         Reads the data record part of the AD2CP packet from the stream
         """
 
-        print("data record type id:", self.id)
+        print("data record type id:", self.data["id"])
         # TODO: figure out where to send the other ids
-        if self.id in (0x15, 0x16, 0x18, ):  # burst/average
+        if self.data["id"] in (0x15, 0x16, 0x18, ):  # burst/average
             if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
                 data_record_format = self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT
                 self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION2
@@ -115,14 +117,14 @@ class Ad2cpDataPacket:
                 self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
             else:
                 raise ValueError("invalid burst/average data record version")
-        elif self.id == 0x1c:  # echosounder
+        elif self.data["id"] == 0x1c:  # echosounder
             # echosounder is only supported by burst/average version 3
             data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
-        elif self.id in (0x17, 0x1b):  # bottom track
+        elif self.data["id"] in (0x17, 0x1b):  # bottom track
             data_record_format = self.BOTTOM_TRACK_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.BOTTOM_TRACK
-        elif self.id == 0xa0:  # string data
+        elif self.data["id"] == 0xa0:  # string data
             data_record_format = self.STRING_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.STRING
         else:
@@ -130,9 +132,9 @@ class Ad2cpDataPacket:
 
         raw_data_record = self._read_data(f, data_record_format)
         print("data record checksum calculated:", self.checksum(
-            raw_data_record), "expected:", self.data_record_checksum)
+            raw_data_record), "expected:", self.data["data_record_checksum"])
         assert self.checksum(
-            raw_data_record) == self.data_record_checksum, "invalid data record checksum"
+            raw_data_record) == self.data["data_record_checksum"], "invalid data record checksum"
 
     def _read_data(self, f: BinaryIO, data_format: List[type_field]) -> bytes:
         """
@@ -167,7 +169,8 @@ class Ad2cpDataPacket:
                     raw_field_entry, field_entry_data_type) for raw_field_entry in raw_field_entries]
                 parsed_field = np.reshape(parsed_field_entries, field_shape)
             if field_name is not None:
-                setattr(self, field_name, parsed_field)
+                self.data[field_name] = parsed_field
+                # setattr(self, field_name, parsed_field)
                 self._postprocess(field_name)
 
         return raw_bytes
@@ -213,6 +216,7 @@ class Ad2cpDataPacket:
             last_bytes_read = f.read(
                 total_num_bytes_to_read - len(all_bytes_read))
             if len(last_bytes_read) == 0:
+                # 0 bytes read with non-0 bytes requested means eof
                 raise NoMorePackets
             else:
                 all_bytes_read += last_bytes_read
@@ -226,68 +230,68 @@ class Ad2cpDataPacket:
 
         if self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION2:
             if field_name == "configuration":
-                self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
-                self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
-                self.compass_sensor_valid = self.configuration & 0b0000_0000_0000_0100 > 0
-                self.tilt_sensor_valid = self.configuration & 0b0000_0000_0000_1000 > 0
-                self.velocity_data_included = self.configuration & 0b0000_0000_0010_0000 > 0
-                self.amplitude_data_included = self.configuration & 0b0000_0000_0100_0000 > 0
-                self.correlation_data_included = self.configuration & 0b0000_0000_1000_0000 > 0
+                self.data["pressure_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0001 > 0
+                self.data["temperature_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0010 > 0
+                self.data["compass_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0100 > 0
+                self.data["tilt_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_1000 > 0
+                self.data["velocity_data_included"] = self.data["configuration"] & 0b0000_0000_0010_0000 > 0
+                self.data["amplitude_data_included"] = self.data["configuration"] & 0b0000_0000_0100_0000 > 0
+                self.data["correlation_data_included"] = self.data["configuration"] & 0b0000_0000_1000_0000 > 0
             elif field_name == "num_beams_and_coordinate_system_and_num_cells":
-                self.num_cells = self.num_beams_and_coordinate_system_and_num_cells & 0b0000_0011_1111_1111
-                self.coordinate_system = (
-                    self.num_beams_and_coordinate_system_and_num_cells & 0b0000_1100_0000_0000) >> 10
-                self.num_beams = (
-                    self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
+                self.data["num_cells"] = self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_0011_1111_1111
+                self.data["coordinate_system"] = (
+                    self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
+                self.data["num_beams"] = (
+                    self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
         elif self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION3:
             if field_name == "configuration":
-                self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
-                self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
-                self.compass_sensor_valid = self.configuration & 0b0000_0000_0000_0100 > 0
-                self.tilt_sensor_valid = self.configuration & 0b0000_0000_0000_1000 > 0
-                self.velocity_data_included = self.configuration & 0b0000_0000_0010_0000 > 0
-                self.amplitude_data_included = self.configuration & 0b0000_0000_0100_0000 > 0
-                self.correlation_data_included = self.configuration & 0b0000_0000_1000_0000 > 0
-                self.altimiter_data_included = self.configuration & 0b0000_0001_0000_0000 > 0
-                self.altimiter_raw_data_included = self.configuration & 0b0000_0010_0000_0000 > 0
-                self.ast_data_included = self.configuration & 0b0000_0100_0000_0000 > 0
-                self.echo_sounder_data_included = self.configuration & 0b0000_1000_0000_0000 > 0
-                self.ahrs_data_included = self.configuration & 0b0001_0000_0000_0000 > 0
-                self.percentage_good_data_included = self.configuration & 0b0010_0000_0000_0000 > 0
-                self.std_dev_data_included = self.configuration & 0b0100_0000_0000_0000 > 0
+                self.data["pressure_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0001 > 0
+                self.data["temperature_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0010 > 0
+                self.data["compass_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0100 > 0
+                self.data["tilt_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_1000 > 0
+                self.data["velocity_data_included"] = self.data["configuration"] & 0b0000_0000_0010_0000 > 0
+                self.data["amplitude_data_included"] = self.data["configuration"] & 0b0000_0000_0100_0000 > 0
+                self.data["correlation_data_included"] = self.data["configuration"] & 0b0000_0000_1000_0000 > 0
+                self.data["altimiter_data_included"] = self.data["configuration"] & 0b0000_0001_0000_0000 > 0
+                self.data["altimiter_raw_data_included"] = self.data["configuration"] & 0b0000_0010_0000_0000 > 0
+                self.data["ast_data_included"] = self.data["configuration"] & 0b0000_0100_0000_0000 > 0
+                self.data["echo_sounder_data_included"] = self.data["configuration"] & 0b0000_1000_0000_0000 > 0
+                self.data["ahrs_data_included"] = self.data["configuration"] & 0b0001_0000_0000_0000 > 0
+                self.data["percentage_good_data_included"] = self.data["configuration"] & 0b0010_0000_0000_0000 > 0
+                self.data["std_dev_data_included"] = self.data["configuration"] & 0b0100_0000_0000_0000 > 0
             elif field_name == "num_beams_and_coordinate_system_and_num_cells":
-                if self.echo_sounder_data_included:
-                    self.num_echo_sounder_cells = self.num_beams_and_coordinate_system_and_num_cells
+                if self.data["echo_sounder_data_included"]:
+                    self.data["num_echo_sounder_cells"] = self.data["num_beams_and_coordinate_system_and_num_cells"]
                 else:
-                    self.num_cells = self.num_beams_and_coordinate_system_and_num_cells & 0b0000_0011_1111_1111
-                    self.coordinate_system = (
-                        self.num_beams_and_coordinate_system_and_num_cells & 0b0000_1100_0000_0000) >> 10
-                    self.num_beams = (
-                        self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
+                    self.data["num_cells"] = self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_0011_1111_1111
+                    self.data["coordinate_system"] = (
+                        self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
+                    self.data["num_beams"] = (
+                        self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
             elif field_name == "ambiguity_velocity_or_echo_sounder_frequency":
-                if self.echo_sounder_data_included:
+                if self.data["echo_sounder_data_included"]:
                     # This is specified as "echo sounder frequency", but the description technically
                     # says "number of echo sounder cells". It is probably the frequency and not the number of cells
                     # because the number of cells already replaces the data in "num_beams_and_coordinate_system_and_num_cells"
                     # when an echo sounder is present
-                    self.echo_sounder_frequency = self.ambiguity_velocity_or_echo_sounder_frequency
+                    self.data["echo_sounder_frequency"] = self.data["ambiguity_velocity_or_echo_sounder_frequency"]
                 else:
-                    self.ambiguity_velocity = self.ambiguity_velocity_or_echo_sounder_frequency
+                    self.data["ambiguity_velocity"] = self.data["ambiguity_velocity_or_echo_sounder_frequency"]
         elif self.data_record_type == DataRecordType.BOTTOM_TRACK:
             if field_name == "configuration":
-                self.pressure_sensor_valid = self.configuration & 0b0000_0000_0000_0001 > 0
-                self.temperature_sensor_valid = self.configuration & 0b0000_0000_0000_0010 > 0
-                self.compass_sensor_valid = self.configuration & 0b0000_0000_0000_0100 > 0
-                self.tilt_sensor_valid = self.configuration & 0b0000_0000_0000_1000 > 0
-                self.velocity_data_included = self.configuration & 0b0000_0000_0010_0000 > 0
-                self.distance_data_included = self.configuration & 0b0000_0001_0000_0000 > 0
-                self.figure_of_merit_data_included = self.configuration & 0b0000_0010_0000_0000 > 0
+                self.data["pressure_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_0001 > 0
+                self.data["temperature_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_0010 > 0
+                self.data["compass_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_0100 > 0
+                self.data["tilt_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_1000 > 0
+                self.data["velocity_data_included"] = self.data["data"]["configuration"] & 0b0000_0000_0010_0000 > 0
+                self.data["distance_data_included"] = self.data["data"]["configuration"] & 0b0000_0001_0000_0000 > 0
+                self.data["figure_of_merit_data_included"] = self.data["data"]["configuration"] & 0b0000_0010_0000_0000 > 0
             elif field_name == "num_beams_and_coordinate_system_and_num_cells":
-                self.num_cells = self.num_beams_and_coordinate_system_and_num_cells & 0b0000_0011_1111_1111
-                self.coordinate_system = (
-                    self.num_beams_and_coordinate_system_and_num_cells & 0b0000_1100_0000_0000) >> 10
-                self.num_beams = (
-                    self.num_beams_and_coordinate_system_and_num_cells & 0b1111_0000_0000_0000) >> 12
+                self.data["num_cells"] = self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_0011_1111_1111
+                self.data["coordinate_system"] = (
+                    self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
+                self.data["num_beams"] = (
+                    self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
 
     @staticmethod
     def checksum(data: bytes) -> int:
@@ -316,7 +320,8 @@ class Ad2cpDataPacket:
     ]
     STRING_DATA_RECORD_FORMAT: List[type_field] = [
         ("string_data_id", 1, UNSIGNED_INTEGER, []),
-        ("string_data", lambda self: self.data_record_size - 1, RAW_BYTES, []),
+        ("string_data",
+         lambda self: self.data["data_record_size"] - 1, RAW_BYTES, []),
     ]
     BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT: List[type_field] = [
         ("version", 1, UNSIGNED_INTEGER, []),
@@ -359,22 +364,22 @@ class Ad2cpDataPacket:
             "velocity_data",
             2,
             SIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.velocity_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["velocity_data_included"]
         ),
         (
             "amplitude_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.amplitude_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["amplitude_data_included"]
         ),
         (
             "correlation_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.correlation_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["correlation_data_included"]
         )
     ]
     BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT: List[type_field] = [
@@ -422,34 +427,34 @@ class Ad2cpDataPacket:
             "velocity_data",
             2,
             SIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.velocity_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["velocity_data_included"]
         ),
         (
             "amplitude_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.amplitude_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["amplitude_data_included"]
         ),
         (
             "correlation_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_beams, self.num_cells],
-            lambda self: self.correlation_data_included
+            lambda self: [self.data["num_beams"], self.data["num_cells"]],
+            lambda self: self.data["correlation_data_included"]
         ),
         ("altimiter_distance", 4, FLOAT, [],
-         lambda self: self.altimiter_data_included),
+         lambda self: self.data["altimiter_data_included"]),
         ("altimiter_quality", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.altimiter_data_included),
-        ("ast_distance", 4, FLOAT, [], lambda self: self.ast_data_included),
+         lambda self: self.data["altimiter_data_included"]),
+        ("ast_distance", 4, FLOAT, [], lambda self: self.data["ast_data_included"]),
         ("ast_quality", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.ast_data_included),
+         lambda self: self.data["ast_data_included"]),
         ("ast_offset_10us", 2, SIGNED_INTEGER, [],
-         lambda self: self.ast_data_included),
-        ("ast_pressure", 4, FLOAT, [], lambda self: self.ast_data_included),
-        ("altimiter_spare", 1, RAW_BYTES, [8], lambda self: self.ast_data_included
+         lambda self: self.data["ast_data_included"]),
+        ("ast_pressure", 4, FLOAT, [], lambda self: self.data["ast_data_included"]),
+        ("altimiter_spare", 1, RAW_BYTES, [8], lambda self: self.data["ast_data_included"]
          ),
         (
             "altimiter_raw_data_num_samples",
@@ -460,72 +465,76 @@ class Ad2cpDataPacket:
             2,
             UNSIGNED_INTEGER,
             [],
-            lambda self: self.altimiter_raw_data_included
+            lambda self: self.data["altimiter_raw_data_included"]
         ),
         ("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.altimiter_raw_data_included),
+         lambda self: self.data["altimiter_raw_data_included"]),
         (
             "altimiter_raw_data_samples",
             2,
             SIGNED_FRACTION,
-            lambda self: [self.altimiter_raw_data_num_samples],
-            lambda self: self.altimiter_raw_data_included,
+            lambda self: [self.data["altimiter_raw_data_num_samples"]],
+            lambda self: self.data["altimiter_raw_data_included"],
         ),
         (
             "echo_sounder_data",
             2,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_cells],
-            lambda self: self.echo_sounder_data_included
+            lambda self: [self.data["num_cells"]],
+            lambda self: self.data["echo_sounder_data_included"]
         ),
-        # ("ahrs_rotation_matrix_m11", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m12", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m13", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m21", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m22", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m23", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m31", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m32", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        # ("ahrs_rotation_matrix_m33", 4, FLOAT, [],
-        #  lambda self: self.ahrs_data_included),
-        ("ahrs_rotation_matrix", 4, FLOAT, [
-         3, 3], lambda self: self.ahrs_data_included),
-        # ("ahrs_quaternions_w", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        # ("ahrs_quaternions_x", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        # ("ahrs_quaternions_y", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        # ("ahrs_quaternions_z", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        ("ahrs_quaternions", 4, FLOAT, [4],
-         lambda self: self.ahrs_data_included),
-        # ("ahrs_gyro_x", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        # ("ahrs_gyro_y", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        # ("ahrs_gyro_z", 4, FLOAT, [], lambda self: self.ahrs_data_included),
-        ("ahrs_gyro", 4, FLOAT, [3], lambda self: self.ahrs_data_included),
+        ("ahrs_rotation_matrix_m11", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m12", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m13", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m21", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m22", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m23", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m31", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m32", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_rotation_matrix_m33", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        # ("ahrs_rotation_matrix", 4, FLOAT, [
+        #  3, 3], lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_quaternions_w", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_quaternions_x", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_quaternions_y", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_quaternions_z", 4, FLOAT, [],
+         lambda self: self.data["ahrs_data_included"]),
+        # ("ahrs_quaternions", 4, FLOAT, [4],
+        #  lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_gyro_x", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_gyro_y", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
+        ("ahrs_gyro_z", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
+        # ("ahrs_gyro", 4, FLOAT, [3], lambda self: self.data["ahrs_data_included"]),
         (
             "percentage_good_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_cells],
-            lambda self: self.percentage_good_data_included
+            lambda self: [self.data["num_cells"]],
+            lambda self: self.data["percentage_good_data_included"]
         ),
         # only the pitch field is labeled as included when the "std dev data included"
         # bit is set, but this is likely a mistake
         ("std_dev_pitch", 2, SIGNED_INTEGER, [],
-         lambda self: self.std_dev_data_included),
+         lambda self: self.data["std_dev_data_included"]),
         ("std_dev_roll", 2, SIGNED_INTEGER, [],
-         lambda self: self.std_dev_data_included),
+         lambda self: self.data["std_dev_data_included"]),
         ("std_dev_heading", 2, SIGNED_INTEGER, [],
-         lambda self: self.std_dev_data_included),
+         lambda self: self.data["std_dev_data_included"]),
         ("std_dev_pressure", 2, SIGNED_INTEGER, [],
-         lambda self: self.std_dev_data_included),
-        (None, 24, RAW_BYTES, [], lambda self: self.std_dev_data_included)
+         lambda self: self.data["std_dev_data_included"]),
+        (None, 24, RAW_BYTES, [], lambda self: self.data["std_dev_data_included"])
     ]
     BOTTOM_TRACK_DATA_RECORD_FORMAT: List[type_field] = [
         ("version", 1, UNSIGNED_INTEGER, []),
@@ -571,22 +580,22 @@ class Ad2cpDataPacket:
             "velocity_data",
             4,
             SIGNED_INTEGER,
-            lambda self: [self.num_beams],
-            lambda self: self.velocity_data_included
+            lambda self: [self.data["num_beams"]],
+            lambda self: self.data["velocity_data_included"]
         ),
         (
             "distance_data",
             4,
             SIGNED_INTEGER,
-            lambda self: [self.num_beams],
-            lambda self: self.distance_data_included
+            lambda self: [self.data["num_beams"]],
+            lambda self: self.data["distance_data_included"]
         ),
         (
             "figure_of_merit_data",
             2,
             UNSIGNED_INTEGER,
-            lambda self: [self.num_beams],
-            lambda self: self.figure_of_merit_data_included
+            lambda self: [self.data["num_beams"]],
+            lambda self: self.data["figure_of_merit_data_included"]
         )
     ]
 
