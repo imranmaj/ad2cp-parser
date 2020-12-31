@@ -25,8 +25,6 @@ class BurstAverageDataRecordVersion(Enum):
 
 @unique
 class DataRecordType(Enum):
-    # BURST_AVERAGE_VERSION2 = auto()
-    # BURST_AVERAGE_VERSION3 = auto()
     BURST_VERSION2 = auto()
     BURST_VERSION3 = auto()
     AVERAGE_VERSION2 = auto()
@@ -96,7 +94,7 @@ class Field:
                 return [Dimension.TIME, Dimension.BEAM, Dimension.RANGE_BIN]
             elif field_name in ("echo_sounder_data", "percentage_good_data"):
                 return [Dimension.TIME, Dimension.RANGE_BIN]
-            elif field_name == "altimiter_raw_data_samples":
+            elif field_name == "altimeter_raw_data_samples":
                 return [Dimension.TIME, Dimension.NUM_ALTIMETER_SAMPLES]
         return [Dimension.TIME]
 
@@ -127,8 +125,6 @@ class SetGroupsAd2cp:
     def save(self):
         self.set_environment()
         self.set_platform()
-        # self.set_provenance()
-        # self.set_sonar()
         self.set_beam()
         self.set_vendor_specific()
 
@@ -161,42 +157,12 @@ class SetGroupsAd2cp:
                 "range_bin": self.ds.get("range_bin")
             },
             attrs={
-                # "platform_name": self.ui_param["platform_name"],
-                # "platform_type": self.ui_param["platform_type"],
-                # "platform_code_ICES": self.ui_param["platform_code_ICES"]
+                "platform_name": self.ui_param["platform_name"],
+                "platform_type": self.ui_param["platform_type"],
+                "platform_code_ICES": self.ui_param["platform_code_ICES"]
             }
         )
         self.write(ds, "Platform")
-
-    # def set_provenance(self):
-    #     ds = xr.Dataset(
-    #         coords={
-    #             "filenames": "",  # TODO
-    #             "source_filenames": []  # TODO
-    #         },
-    #         attrs={
-    #             "conversion_software_name": "echopype",
-    #             "conversion_software_version": ECHOPYPE_VERSION,
-    #             "conversion_time": datetime.now(tz=pytz.utc).isoformat(timespec="seconds"),
-    #         }
-    #     )
-    #     self.write(ds, "Provenance")
-
-    # def set_sonar(self):
-    #     attrs = {
-    #         "sonar_manufacturer": "Nortek",
-    #         "sonar_model": "Signature 1000",
-    #         "sonar_software_name": "",
-    #         "sonar_software_version": "",
-    #         "sonar_type": "ADCP"
-    #     }
-    #     serial_number = self.ds.get("serial_number")
-    #     if serial_number is not None:
-    #         attrs["sonar_serial_number"] = serial_number.data[0]
-
-    #     ds = xr.Dataset(
-    #         attrs=attrs)
-    #     self.write(ds, "Sonar")
 
     def set_beam(self):
         data_vars = {
@@ -206,7 +172,7 @@ class SetGroupsAd2cp:
             "blanking": self.ds.get("blanking"),
             "cell_size": self.ds.get("cell_size"),
             "velocity_range": self.ds.get("velocity_range"),
-            # should these just be empty if they dont exist or not be included at all?
+            # TODO: should the following 2 just be empty if they dont exist or not be included at all?
             "echosounder_frequency": self.ds.get("echo_sounder_frequency"),
             "ambiguity_velocity": self.ds.get("ambiguity_velocity"),
             "data_set_description": self.ds.get("dataset_description"),
@@ -223,10 +189,10 @@ class SetGroupsAd2cp:
             "ast_quality": self.ds.get("ast_quality"),
             "ast_offset_10us": self.ds.get("ast_offset_10us"),
             "ast_pressure": self.ds.get("ast_pressure"),
-            "altimiter_spare": self.ds.get("altimiter_spare"),
-            "altimiter_raw_data_num_samples": self.ds.get("altimiter_raw_data_num_samples"),
-            "altimiter_raw_data_sample_distance": self.ds.get("altimiter_raw_data_sample_distance"),
-            "altimiter_raw_data_samples": self.ds.get("altimiter_raw_data_samples")
+            "altimeter_spare": self.ds.get("altimeter_spare"),
+            "altimeter_raw_data_num_samples": self.ds.get("altimeter_raw_data_num_samples"),
+            "altimeter_raw_data_sample_distance": self.ds.get("altimeter_raw_data_sample_distance"),
+            "altimeter_raw_data_samples": self.ds.get("altimeter_raw_data_samples")
         }
         # if self.ds["echo_sounder_data_included"][0]:  # echosounder
         #     data_vars["echosounder_frequency"] = self.ds.get(
@@ -257,8 +223,8 @@ class SetGroupsAd2cp:
             "velocity_data_included": self.ds.get("velocity_data_included"),
             "amplitude_data_included": self.ds.get("amplitude_data_included"),
             "correlation_data_included": self.ds.get("correlation_data_included"),
-            "altimiter_data_included": self.ds.get("altimiter_data_included"),
-            "altimiter_raw_data_included": self.ds.get("altimiter_raw_data_included"),
+            "altimeter_data_included": self.ds.get("altimeter_data_included"),
+            "altimeter_raw_data_included": self.ds.get("altimeter_raw_data_included"),
             "ast_data_included": self.ds.get("ast_data_included"),
             "echo_sounder_data_included": self.ds.get("echo_sounder_data_included"),
             "ahrs_data_included": self.ds.get("ahrs_data_included"),
@@ -280,7 +246,6 @@ class SetGroupsAd2cp:
             "magnetometer_temperature": self.ds.get("magnetometer_temperature"),
             "real_time_clock_temperature": self.ds.get("real_time_clock_temperature"),
             "ensemble_counter": self.ds.get("ensemble_counter"),
-            # TODO: listed in doc as one field, should these be multiple? (3x3 matrix)
             "ahrs_rotation_matrix_mij": ("mij", [
                 self.ds.get("ahrs_rotation_matrix_m11"),
                 self.ds.get("ahrs_rotation_matrix_m12"),
@@ -292,19 +257,12 @@ class SetGroupsAd2cp:
                 self.ds.get("ahrs_rotation_matrix_m32"),
                 self.ds.get("ahrs_rotation_matrix_m33")
             ]),
-            # "ahrs_quaternions_w": self.ds.get("ahrs_quaternions_w"),
-            # "ahrs_quaternions_x": self.ds.get("ahrs_quaternions_x"),
-            # "ahrs_quaternions_y": self.ds.get("ahrs_quaternions_y"),
-            # "ahrs_quaternions_z": self.ds.get("ahrs_quaternions_z"),
             "ahrs_quaternions_wxyz": ("wxyz", [
                 self.ds.get("ahrs_quaternions_w"),
                 self.ds.get("ahrs_quaternions_x"),
                 self.ds.get("ahrs_quaternions_y"),
                 self.ds.get("ahrs_quaternions_z"),
             ]),
-            # "ahrs_gyro_x": self.ds.get("ahrs_gyro_x"),
-            # "ahrs_gyro_y": self.ds.get("ahrs_gyro_y"),
-            # "ahrs_gyro_z": self.ds.get("ahrs_gyro_z"),
             "ahrs_gyro_xyz": ("xyz", [
                 self.ds.get("ahrs_gyro_x"),
                 self.ds.get("ahrs_gyro_y"),
@@ -333,16 +291,12 @@ class SetGroupsAd2cp:
 class Ad2cpReader:
     def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3):
         self.packets = []
-        counter = 0
         while True:
             try:
                 self.packets.append(Ad2cpDataPacket(
                     f, burst_average_data_record_version))
             except NoMorePackets:
                 break
-            else:
-                counter += 1
-                # print(f"finished reading packet #{counter}", end="\n\n")
         print(f"successfully found and read {len(self.packets)} packets")
 
     def parse_raw(self) -> xr.Dataset:
@@ -365,11 +319,6 @@ class Ad2cpReader:
                             (field_value, [[np.nan] * max_range_bin_count for _ in range(max_beam_count - len(field_value))]))
                         packet.data[field_name] = np.array(field_value)
 
-        i = 0
-        # assemble burst and average packets separately, then deal with different numbers of beams (pad with nans)
-        # https://github.com/OSOceanAcoustics/echopype/blob/ad2cp_convert/echopype/convert/parse_base.py#L225
-        # all_burst_ds = []
-        # all_average_ds = []
         for packet in self.packets:
             if packet.data_record_type == DataRecordType.STRING:
                 ds.attrs["string_data"][packet.data["string_data_id"]
@@ -377,30 +326,13 @@ class Ad2cpReader:
             else:
                 if packet.data_record_type in (DataRecordType.BURST_VERSION2, DataRecordType.BURST_VERSION3):
                     time = "time_burst"
-                    # print("burst", packet.data["num_beams"])
                 else:
                     time = "time_average"
-                    # print("average", packet.data["num_beams"])
                 data_vars = dict()
                 for field_name, field_value in packet.data.items():
-                    # if hasattr(v, "__iter__"):
-                    # TODO might not work with altimeter_spare, altimeter_raw_data_samples, echo_sounder_data, percentage_good_data, velocity_data, distance_data, figure_of_merit_data
-                    # if isinstance(v, np.ndarray):
-
-                    # if k in ("velocity_data", "amplitude_data", "correlation_data", ):
-                    #     data_vars[k] = (("time", "beam", "range_bin"), [v])
-                    # else:
-                    #     data_vars[k] = (("time"), [v])
+                    # TODO might not work with altimeter_spare
                     data_vars[field_name] = (tuple(dim.value for dim in Field.dimensions(
                         field_name, packet.data_record_format)), [field_value])
-                    # data_vars[k] = ((time, "beam", "range_bin"), [v])
-                # ds = xr.merge([
-                #     ds,
-                #     xr.Dataset(
-                #         data_vars=data_vars,
-                #         coords={time: [packet.timestamp]}
-                #     )
-                # ], compat="override", combine_attrs="override")
                 ds = xr.merge([
                     ds,
                     xr.Dataset(
@@ -409,29 +341,6 @@ class Ad2cpReader:
                                 time: [packet.timestamp]}
                     )
                 ], compat="override", combine_attrs="override")
-                # ds = xr.Dataset(
-                #     data_vars=data_vars,
-                #     coords={time: [packet.timestamp]}
-                # )
-                # if packet.data_record_type in (DataRecordType.BURST_VERSION2, DataRecordType.BURST_VERSION3):
-                #     all_burst_ds.append(ds)
-                # else:
-                #     all_average_ds.append(ds)
-                # ds = ds.combine_first(
-                #     xr.Dataset(
-                #         data_vars=data_vars,
-                #         coords={"time": [packet.timestamp],
-                #             time: [packet.timestamp]}
-                #     )
-                # )
-                # ds = ds.combine_first(
-                #     xr.Dataset(
-                #         data_vars=data_vars,
-                #         coords={"time": [packet.timestamp]}
-                #     )
-                # )
-                print(i)
-                i += 1
         return ds
 
 
@@ -441,7 +350,7 @@ class Ad2cpDataPacket:
         # self.data_record_type: Optional[DataRecordType] = None
         self.data = dict()
         self._read_data_record_header(f)
-        self._read_data_record_body(f)
+        self._read_data_record(f)
 
     @property
     def timestamp(self) -> np.datetime64:
@@ -461,13 +370,12 @@ class Ad2cpDataPacket:
 
         self.data_record_format = self.HEADER_FORMAT
         raw_header = self._read_data(f, self.data_record_format)
-        # print("header checksum      calculated:", self.checksum(
-        #     raw_header[: -2]), "expected:", self.data["header_checksum"])
         # don't include the last 2 bytes, which is the header checksum itself
-        assert self.checksum(
-            raw_header[: -2]) == self.data["header_checksum"], "invalid header checksum"
+        calculated_checksum = self.checksum(raw_header[: -2])
+        expected_checksum = self.data["header_checksum"]
+        assert calculated_checksum == expected_checksum, f"invalid header checksum: found {calculated_checksum}, expected {expected_checksum}"
 
-    def _read_data_record_body(self, f: BinaryIO):
+    def _read_data_record(self, f: BinaryIO):
         """
         Reads the data record part of the AD2CP packet from the stream
         """
@@ -506,7 +414,7 @@ class Ad2cpDataPacket:
             self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.AVERAGE_VERSION3
         elif self.data["id"] == 0x1e:  # altimeter
-            # altimiter is only supported by burst/average version 3
+            # altimeter is only supported by burst/average version 3
             self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.AVERAGE_VERSION3
         elif self.data["id"] == 0x1f:  # average altimeter
@@ -519,10 +427,9 @@ class Ad2cpDataPacket:
             raise ValueError("invalid data record type id")
 
         raw_data_record = self._read_data(f, self.data_record_format)
-        # print("data record checksum calculated:", self.checksum(
-        #     raw_data_record), "expected:", self.data["data_record_checksum"])
-        assert self.checksum(
-            raw_data_record) == self.data["data_record_checksum"], "invalid data record checksum"
+        calculated_checksum = self.checksum(raw_data_record)
+        expected_checksum = self.data["data_record_checksum"]
+        assert calculated_checksum == expected_checksum, f"invalid data record checksum: found {calculated_checksum}, expected {expected_checksum}"
 
     def _read_data(self, f: BinaryIO, data_format: List[Field]) -> bytes:
         """
@@ -644,8 +551,8 @@ class Ad2cpDataPacket:
                 self.data["velocity_data_included"] = self.data["configuration"] & 0b0000_0000_0010_0000 > 0
                 self.data["amplitude_data_included"] = self.data["configuration"] & 0b0000_0000_0100_0000 > 0
                 self.data["correlation_data_included"] = self.data["configuration"] & 0b0000_0000_1000_0000 > 0
-                self.data["altimiter_data_included"] = self.data["configuration"] & 0b0000_0001_0000_0000 > 0
-                self.data["altimiter_raw_data_included"] = self.data["configuration"] & 0b0000_0010_0000_0000 > 0
+                self.data["altimeter_data_included"] = self.data["configuration"] & 0b0000_0001_0000_0000 > 0
+                self.data["altimeter_raw_data_included"] = self.data["configuration"] & 0b0000_0010_0000_0000 > 0
                 self.data["ast_data_included"] = self.data["configuration"] & 0b0000_0100_0000_0000 > 0
                 self.data["echo_sounder_data_included"] = self.data["configuration"] & 0b0000_1000_0000_0000 > 0
                 self.data["ahrs_data_included"] = self.data["configuration"] & 0b0001_0000_0000_0000 > 0
@@ -684,10 +591,6 @@ class Ad2cpDataPacket:
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
                 self.data["num_beams"] = (
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
-
-        # TODO: bottom track record does not need this
-        # if field_name in ("velocity_data", "amplitude_data", "correlation_data", "echosounder_data"):
-        #     self.data[field_name] = (("beam", "range_bin"), self.data[field_name])
 
     @staticmethod
     def checksum(data: bytes) -> int:
@@ -845,10 +748,10 @@ class Ad2cpDataPacket:
                 self.data["num_beams"], self.data["num_cells"]],
             field_exists_predicate=lambda self: self.data["correlation_data_included"]
         ),
-        F("altimiter_distance", 4, FLOAT,
-          field_exists_predicate=lambda self: self.data["altimiter_data_included"]),
-        F("altimiter_quality", 2, UNSIGNED_INTEGER,
-          field_exists_predicate=lambda self: self.data["altimiter_data_included"]),
+        F("altimeter_distance", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["altimeter_data_included"]),
+        F("altimeter_quality", 2, UNSIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["altimeter_data_included"]),
         F("ast_distance", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ast_data_included"]),
         F("ast_quality", 2, UNSIGNED_INTEGER,
@@ -857,27 +760,27 @@ class Ad2cpDataPacket:
           field_exists_predicate=lambda self: self.data["ast_data_included"]),
         F("ast_pressure", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ast_data_included"]),
-        F("altimiter_spare", 1, RAW_BYTES, field_shape=[8], field_exists_predicate=lambda self: self.data["ast_data_included"]
+        F("altimeter_spare", 1, RAW_BYTES, field_shape=[8], field_exists_predicate=lambda self: self.data["ast_data_included"]
           ),
         F(
-            "altimiter_raw_data_num_samples",
+            "altimeter_raw_data_num_samples",
             # The field size of this field is technically specified as number of samples * 2,
             # but seeing as the field is called "num samples," and the field which is supposed
             # to contain the samples is specified as having a constant size of 2, these fields
             # sizes were likely incorrectly swapped.
             2,
             UNSIGNED_INTEGER,
-            field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"]
+            field_exists_predicate=lambda self: self.data["altimeter_raw_data_included"]
         ),
-        F("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER,
-          field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"]),
+        F("altimeter_raw_data_sample_distance", 2, UNSIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["altimeter_raw_data_included"]),
         F(
-            "altimiter_raw_data_samples",
+            "altimeter_raw_data_samples",
             2,
             SIGNED_FRACTION,
             field_shape=lambda self: [
-                self.data["altimiter_raw_data_num_samples"]],
-            field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"],
+                self.data["altimeter_raw_data_num_samples"]],
+            field_exists_predicate=lambda self: self.data["altimeter_raw_data_included"],
         ),
         F(
             "echo_sounder_data",
@@ -904,8 +807,6 @@ class Ad2cpDataPacket:
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         F("ahrs_rotation_matrix_m33", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
-        # ("ahrs_rotation_matrix", 4, FLOAT, [
-        #  3, 3], lambda self: self.data["ahrs_data_included"]),
         F("ahrs_quaternions_w", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         F("ahrs_quaternions_x", 4, FLOAT,
@@ -914,8 +815,6 @@ class Ad2cpDataPacket:
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         F("ahrs_quaternions_z", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
-        # ("ahrs_quaternions", 4, FLOAT, [4],
-        #  lambda self: self.data["ahrs_data_included"]),
         F("ahrs_gyro_x", 4, FLOAT,
           field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         F("ahrs_gyro_y", 4, FLOAT,
@@ -1011,19 +910,6 @@ if __name__ == "__main__":
     import sys
     with open(sys.argv[1], "rb") as f:
         reader = Ad2cpReader(f)
-
-    # for packet in reader.packets:
-    #     print(packet.__dict__)
-    # for packet in reader.packets:
-    #     if hasattr(packet, "velocity_data"):
-    #         print(packet.velocity_data)
-    # num_beams = dict()
-    # for p in reader.packets:
-    #     if "num_beams" in p.data:
-    #         if p.data["num_beams"] not in num_beams:
-    #             num_beams[p.data["num_beams"]] = 0
-    #         num_beams[p.data["num_beams"]] += 1
-    # print(num_beams)
 
     x = SetGroupsAd2cp(reader, "test.nc")
     x.save()
