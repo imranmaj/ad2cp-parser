@@ -4,12 +4,17 @@
 
 # https://support.nortekgroup.com/hc/en-us/articles/360029513952-Integrators-Guide-Signature
 
-from typing import BinaryIO, Tuple, Union, Callable, List, Optional, Any
+from typing import BinaryIO, Tuple, Union, Callable, List, Dict, Optional, Any
 from enum import Enum, unique, auto
+from datetime import datetime
 import struct
 import math
+import os
 
 import numpy as np
+from numpy.core.numeric import NaN
+import xarray as xr
+import pytz
 
 
 @unique
@@ -20,138 +25,519 @@ class BurstAverageDataRecordVersion(Enum):
 
 @unique
 class DataRecordType(Enum):
-    BURST_AVERAGE_VERSION2 = auto()
-    BURST_AVERAGE_VERSION3 = auto()
+    # BURST_AVERAGE_VERSION2 = auto()
+    # BURST_AVERAGE_VERSION3 = auto()
+    BURST_VERSION2 = auto()
+    BURST_VERSION3 = auto()
+    AVERAGE_VERSION2 = auto()
+    AVERAGE_VERSION3 = auto()
     BOTTOM_TRACK = auto()
     STRING = auto()
 
 
 @unique
 class DataType(Enum):
+    RAW_BYTES = auto()
+    STRING = auto()
     SIGNED_INTEGER = auto()
     UNSIGNED_INTEGER = auto()
-    RAW_BYTES = auto()
     FLOAT = auto()
     # TODO: figure out what this is in binary
     SIGNED_FRACTION = auto()
 
 
+RAW_BYTES = DataType.RAW_BYTES
+STRING = DataType.STRING
 SIGNED_INTEGER = DataType.SIGNED_INTEGER
 UNSIGNED_INTEGER = DataType.UNSIGNED_INTEGER
-RAW_BYTES = DataType.RAW_BYTES
 FLOAT = DataType.FLOAT
 SIGNED_FRACTION = DataType.SIGNED_FRACTION
 
-# Name of the field
-type_field_name = Optional[str]
-# Size of each entry in the field in bytes.
-# If the shape of the field is [], then it is the size of the entire field.
-# Can be a function
-type_field_entry_size_bytes = Union[int, Callable[["Ad2cpDataPacket"], int]]
-# Shape of the entries in the field. Can be a function
-type_field_shape = Union[List[int], Callable[["Ad2cpDataPacket"], List[int]]]
-# Type of each entry
-type_field_entry_data_type = DataType
-# Optional predicate to determine whether the field exists at all
-type_predicate = Callable[["Ad2cpDataPacket"], bool]
-type_without_predicate_field = Tuple[type_field_name,
-                                     type_field_entry_size_bytes, type_field_entry_data_type, type_field_shape]
-type_with_predicate_field = Tuple[type_field_name,
-                                  type_field_entry_size_bytes, type_field_entry_data_type, type_field_shape, type_predicate]
-type_field = Union[type_without_predicate_field, type_with_predicate_field]
+
+@unique
+class Dimension(Enum):
+    TIME = "time"
+    BEAM = "beam"
+    RANGE_BIN = "range_bin"
+    NUM_ALTIMETER_SAMPLES = "num_altimeter_samples"
+
+
+class Field:
+    def __init__(self, field_name: Optional[str], field_entry_size_bytes: Union[int, Callable[["Ad2cpDataPacket"], int]], field_entry_data_type: DataType, *, field_shape: Union[List[int], Callable[["Ad2cpDataPacket"], List[int]]] = [], field_exists_predicate: Callable[["Ad2cpDataPacket"], bool] = lambda _: True):
+        """
+        field_name: Name of the field. If None, the field is parsed but ignored
+        field_entry_size_bytes: Size of each entry within the field, in bytes. 
+            In most cases, the entry is the field itself, but sometimes the field
+            contains a list of entries.
+        field_entry_data_type: Data type of each entry in the field
+        field_shape: Shape of entries within the field. 
+            [] (the default) means the entry is the field itself,
+            [n] means the field consists of a list of n entries,
+            [n, m] means the field consists of a two dimensional array with
+                n number of m length arrays,
+            etc.
+        field_exists_predicate: Tests to see whether the field should be parsed at all
+        """
+
+        self.field_name = field_name
+        self.field_entry_size_bytes = field_entry_size_bytes
+        self.field_entry_data_type = field_entry_data_type
+        self.field_shape = field_shape
+        self.field_exists_predicate = field_exists_predicate
+
+    @staticmethod
+    def dimensions(field_name: str, data_record_format: List["Field"]) -> List[Dimension]:
+        # TODO: altimeter spare (but it's not included in final dataset)
+        if data_record_format == Ad2cpDataPacket.BOTTOM_TRACK_DATA_RECORD_FORMAT:
+            if field_name in ("velocity_data", "distance_data", "figure_of_merit_data"):
+                return [Dimension.TIME, Dimension.BEAM]
+        else:
+            if field_name in ("velocity_data", "amplitude_data", "correlation_data"):
+                return [Dimension.TIME, Dimension.BEAM, Dimension.RANGE_BIN]
+            elif field_name in ("echo_sounder_data", "percentage_good_data"):
+                return [Dimension.TIME, Dimension.RANGE_BIN]
+            elif field_name == "altimiter_raw_data_samples":
+                return [Dimension.TIME, Dimension.NUM_ALTIMETER_SAMPLES]
+        return [Dimension.TIME]
+
+
+F = Field  # use F instead of Field to make the repeated fields easier to read
+
+ECHOPYPE_VERSION = 0
 
 
 class NoMorePackets(Exception):
     pass
 
 
+class SetGroupsAd2cp:
+    def __init__(self, parser: "Ad2cpReader", output_path: str):
+        self.parser = parser
+        self.ds = parser.parse_raw()
+        print(self.ds)
+        self.output_path = output_path
+
+    def write(self, ds: xr.Dataset, group: str):
+        if os.path.exists(self.output_path):
+            mode = "a"
+        else:
+            mode = "w"
+        ds.to_netcdf(path=self.output_path, mode=mode, group=group)
+
+    def save(self):
+        self.set_environment()
+        self.set_platform()
+        # self.set_provenance()
+        # self.set_sonar()
+        self.set_beam()
+        self.set_vendor_specific()
+
+    def set_environment(self):
+        ds = xr.Dataset(data_vars={
+            "sound_speed_indicative": self.ds.get("speed_of_sound"),
+            "temperature": self.ds.get("temperature"),
+            "pressure": self.ds.get("pressure")
+        },
+            coords={
+            "time_burst": self.ds.get("time_burst", []),
+            "time_average": self.ds.get("time_average", [])
+        })
+        self.write(ds, "Environment")
+
+    def set_platform(self):
+        ds = xr.Dataset(
+            data_vars={
+                "heading": self.ds.get("heading"),
+                "pitch": self.ds.get("pitch"),
+                "roll": self.ds.get("roll"),
+                "magnetometer_raw_x": self.ds.get("magnetometer_raw_x"),
+                "magnetometer_raw_y": self.ds.get("magnetometer_raw_y"),
+                "magnetometer_raw_z": self.ds.get("magnetometer_raw_z"),
+            },
+            coords={
+                "time_burst": self.ds.get("time_burst"),
+                "time_average": self.ds.get("time_average"),
+                "beam": self.ds.get("beam"),
+                "range_bin": self.ds.get("range_bin")
+            },
+            attrs={
+                # "platform_name": self.ui_param["platform_name"],
+                # "platform_type": self.ui_param["platform_type"],
+                # "platform_code_ICES": self.ui_param["platform_code_ICES"]
+            }
+        )
+        self.write(ds, "Platform")
+
+    # def set_provenance(self):
+    #     ds = xr.Dataset(
+    #         coords={
+    #             "filenames": "",  # TODO
+    #             "source_filenames": []  # TODO
+    #         },
+    #         attrs={
+    #             "conversion_software_name": "echopype",
+    #             "conversion_software_version": ECHOPYPE_VERSION,
+    #             "conversion_time": datetime.now(tz=pytz.utc).isoformat(timespec="seconds"),
+    #         }
+    #     )
+    #     self.write(ds, "Provenance")
+
+    # def set_sonar(self):
+    #     attrs = {
+    #         "sonar_manufacturer": "Nortek",
+    #         "sonar_model": "Signature 1000",
+    #         "sonar_software_name": "",
+    #         "sonar_software_version": "",
+    #         "sonar_type": "ADCP"
+    #     }
+    #     serial_number = self.ds.get("serial_number")
+    #     if serial_number is not None:
+    #         attrs["sonar_serial_number"] = serial_number.data[0]
+
+    #     ds = xr.Dataset(
+    #         attrs=attrs)
+    #     self.write(ds, "Sonar")
+
+    def set_beam(self):
+        data_vars = {
+            "number_of_beams": self.ds.get("num_beams"),
+            "coordinate_system": self.ds.get("coordinate_system"),
+            "number_of_cells": self.ds.get("num_cells"),
+            "blanking": self.ds.get("blanking"),
+            "cell_size": self.ds.get("cell_size"),
+            "velocity_range": self.ds.get("velocity_range"),
+            # should these just be empty if they dont exist or not be included at all?
+            "echosounder_frequency": self.ds.get("echo_sounder_frequency"),
+            "ambiguity_velocity": self.ds.get("ambiguity_velocity"),
+            "data_set_description": self.ds.get("dataset_description"),
+            "transmit_energy": self.ds.get("transmit_energy"),
+            "velocity_scaling": self.ds.get("velocity_scaling"),
+            "velocity": self.ds.get("velocity_data"),
+            "amplitude": self.ds.get("amplitude_data"),
+            "correlation": self.ds.get("correlation_data"),
+            "echosounder": self.ds.get("echosounder_data"),
+            "figure_of_merit": self.ds.get("figure_of_merit_data"),
+            "altimeter_distance": self.ds.get("altimeter_distance"),
+            "altimeter_quality": self.ds.get("altimeter_quality"),
+            "ast_distance": self.ds.get("ast_distance"),
+            "ast_quality": self.ds.get("ast_quality"),
+            "ast_offset_10us": self.ds.get("ast_offset_10us"),
+            "ast_pressure": self.ds.get("ast_pressure"),
+            "altimiter_spare": self.ds.get("altimiter_spare"),
+            "altimiter_raw_data_num_samples": self.ds.get("altimiter_raw_data_num_samples"),
+            "altimiter_raw_data_sample_distance": self.ds.get("altimiter_raw_data_sample_distance"),
+            "altimiter_raw_data_samples": self.ds.get("altimiter_raw_data_samples")
+        }
+        # if self.ds["echo_sounder_data_included"][0]:  # echosounder
+        #     data_vars["echosounder_frequency"] = self.ds.get(
+        #         "echo_sounder_frequency")
+        # else:
+        #     data_vars["ambiguity_velocity"] = self.ds.get("ambiguity_velocity")
+
+        ds = xr.Dataset(
+            data_vars=data_vars,
+            coords={
+                "time_burst": self.ds.get("time_burst"),
+                "time_average": self.ds.get("time_average"),
+                "beam": self.ds.get("beam"),
+                "range_bin": self.ds.get("range_bin"),
+                "altimeter_sample_bin": self.ds.get("altimeter_sample_bin"),
+                "range_bin_echosounder": self.ds.get("num_beams_and_coordinate_system_and_num_cells")
+            }
+        )
+        self.write(ds, "Beam")
+
+    def set_vendor_specific(self):
+        attrs = {
+            "offset_of_data": self.ds.get("offset_of_data"),
+            "pressure_sensor_valid": self.ds.get("pressure_sensor_valid"),
+            "temperature_sensor_valid": self.ds.get("temperature_sensor_valid"),
+            "compass_sensor_valid": self.ds.get("compass_sensor_valid"),
+            "tilt_sensor_valid": self.ds.get("tilt_sensor_valid"),
+            "velocity_data_included": self.ds.get("velocity_data_included"),
+            "amplitude_data_included": self.ds.get("amplitude_data_included"),
+            "correlation_data_included": self.ds.get("correlation_data_included"),
+            "altimiter_data_included": self.ds.get("altimiter_data_included"),
+            "altimiter_raw_data_included": self.ds.get("altimiter_raw_data_included"),
+            "ast_data_included": self.ds.get("ast_data_included"),
+            "echo_sounder_data_included": self.ds.get("echo_sounder_data_included"),
+            "ahrs_data_included": self.ds.get("ahrs_data_included"),
+            "percentage_good_data_included": self.ds.get("percentage_good_data_included"),
+            "std_dev_data_included": self.ds.get("std_dev_data_included"),
+            "figure_of_merit_data_included": self.ds.get("figure_of_merit_data_included"),
+        }
+        attrs = {field_name: field_value.data[0] for field_name, field_value in attrs.items(
+        ) if field_value is not None}
+        ds = xr.Dataset(data_vars={
+            "data_record_version": self.ds.get("version"),
+            "error": self.ds.get("error"),
+            "status": self.ds.get("status"),
+            "status0": self.ds.get("status0"),
+            "battery_voltage": self.ds.get("battery_voltage"),
+            "power_level": self.ds.get("power_level"),
+            "temperature_of_pressure_sensor": self.ds.get("temperature_from_pressure_sensor"),
+            "nominal_correlation": self.ds.get("nominal_correlation"),
+            "magnetometer_temperature": self.ds.get("magnetometer_temperature"),
+            "real_time_clock_temperature": self.ds.get("real_time_clock_temperature"),
+            "ensemble_counter": self.ds.get("ensemble_counter"),
+            # TODO: listed in doc as one field, should these be multiple? (3x3 matrix)
+            "ahrs_rotation_matrix_mij": ("mij", [
+                self.ds.get("ahrs_rotation_matrix_m11"),
+                self.ds.get("ahrs_rotation_matrix_m12"),
+                self.ds.get("ahrs_rotation_matrix_m13"),
+                self.ds.get("ahrs_rotation_matrix_m21"),
+                self.ds.get("ahrs_rotation_matrix_m22"),
+                self.ds.get("ahrs_rotation_matrix_m23"),
+                self.ds.get("ahrs_rotation_matrix_m31"),
+                self.ds.get("ahrs_rotation_matrix_m32"),
+                self.ds.get("ahrs_rotation_matrix_m33")
+            ]),
+            # "ahrs_quaternions_w": self.ds.get("ahrs_quaternions_w"),
+            # "ahrs_quaternions_x": self.ds.get("ahrs_quaternions_x"),
+            # "ahrs_quaternions_y": self.ds.get("ahrs_quaternions_y"),
+            # "ahrs_quaternions_z": self.ds.get("ahrs_quaternions_z"),
+            "ahrs_quaternions_wxyz": ("wxyz", [
+                self.ds.get("ahrs_quaternions_w"),
+                self.ds.get("ahrs_quaternions_x"),
+                self.ds.get("ahrs_quaternions_y"),
+                self.ds.get("ahrs_quaternions_z"),
+            ]),
+            # "ahrs_gyro_x": self.ds.get("ahrs_gyro_x"),
+            # "ahrs_gyro_y": self.ds.get("ahrs_gyro_y"),
+            # "ahrs_gyro_z": self.ds.get("ahrs_gyro_z"),
+            "ahrs_gyro_xyz": ("xyz", [
+                self.ds.get("ahrs_gyro_x"),
+                self.ds.get("ahrs_gyro_y"),
+                self.ds.get("ahrs_gyro_z"),
+            ]),
+            "percentage_good_data": self.ds.get("percentage_good_data"),
+            "std_dev_pitch": self.ds.get("std_dev_pitch"),
+            "std_dev_roll": self.ds.get("std_dev_roll"),
+            "std_dev_heading": self.ds.get("std_dev_heading"),
+            "std_dev_pressure": self.ds.get("std_dev_pressure"),
+        },
+            coords={
+            "time_burst": self.ds.get("time_burst"),
+            "time_average": self.ds.get("time_average"),
+            "beam": self.ds.get("beam"),
+            "range_bin": self.ds.get("range_bin"),
+        }, attrs=attrs)
+        ds = ds.reindex({
+            "mij": ["11", "12", "13", "21", "22", "23", "31", "32", "33"],
+            "wxyz": ["w", "x", "y", "z"],
+            "xyz": ["x", "y", "z"],
+        })
+        self.write(ds, "Vendor")
+
+
 class Ad2cpReader:
-    def __init__(self, f: BinaryIO, data_record_format_type: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3):
+    def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion = BurstAverageDataRecordVersion.VERSION3):
         self.packets = []
         counter = 0
         while True:
             try:
                 self.packets.append(Ad2cpDataPacket(
-                    f, data_record_format_type))
+                    f, burst_average_data_record_version))
             except NoMorePackets:
                 break
             else:
                 counter += 1
-                print(f"finished reading packet #{counter}", end="\n\n")
+                # print(f"finished reading packet #{counter}", end="\n\n")
         print(f"successfully found and read {len(self.packets)} packets")
+
+    def parse_raw(self) -> xr.Dataset:
+        ds = xr.Dataset(attrs={"string_data": dict()})
+
+        max_beam_count = max(
+            self.packets, key=lambda p: p.data["num_beams"] if "num_beams" in p.data else 0).data["num_beams"]
+        max_range_bin_count = max(
+            self.packets, key=lambda p: p.data["num_cells"] if "num_cells" in p.data else 0).data["num_cells"]
+        # TODO: fill packets with missing beams with Nones up to the max beam count
+        for packet in self.packets:
+            for field_name, field_value in packet.data.items():
+                if isinstance(field_value, np.ndarray):
+                    if len(field_value[0]) < max_range_bin_count:
+                        field_value = [np.concatenate(
+                            (beam, [np.nan] * (max_range_bin_count - len(field_value[0])))) for beam in field_value]
+                        packet.data[field_name] = np.array(field_value)
+                    if len(field_value) < max_beam_count:
+                        field_value = np.concatenate(
+                            (field_value, [[np.nan] * max_range_bin_count for _ in range(max_beam_count - len(field_value))]))
+                        packet.data[field_name] = np.array(field_value)
+
+        i = 0
+        # assemble burst and average packets separately, then deal with different numbers of beams (pad with nans)
+        # https://github.com/OSOceanAcoustics/echopype/blob/ad2cp_convert/echopype/convert/parse_base.py#L225
+        # all_burst_ds = []
+        # all_average_ds = []
+        for packet in self.packets:
+            if packet.data_record_type == DataRecordType.STRING:
+                ds.attrs["string_data"][packet.data["string_data_id"]
+                                        ] = packet.data["string_data"]
+            else:
+                if packet.data_record_type in (DataRecordType.BURST_VERSION2, DataRecordType.BURST_VERSION3):
+                    time = "time_burst"
+                    # print("burst", packet.data["num_beams"])
+                else:
+                    time = "time_average"
+                    # print("average", packet.data["num_beams"])
+                data_vars = dict()
+                for field_name, field_value in packet.data.items():
+                    # if hasattr(v, "__iter__"):
+                    # TODO might not work with altimeter_spare, altimeter_raw_data_samples, echo_sounder_data, percentage_good_data, velocity_data, distance_data, figure_of_merit_data
+                    # if isinstance(v, np.ndarray):
+
+                    # if k in ("velocity_data", "amplitude_data", "correlation_data", ):
+                    #     data_vars[k] = (("time", "beam", "range_bin"), [v])
+                    # else:
+                    #     data_vars[k] = (("time"), [v])
+                    data_vars[field_name] = (tuple(dim.value for dim in Field.dimensions(
+                        field_name, packet.data_record_format)), [field_value])
+                    # data_vars[k] = ((time, "beam", "range_bin"), [v])
+                # ds = xr.merge([
+                #     ds,
+                #     xr.Dataset(
+                #         data_vars=data_vars,
+                #         coords={time: [packet.timestamp]}
+                #     )
+                # ], compat="override", combine_attrs="override")
+                ds = xr.merge([
+                    ds,
+                    xr.Dataset(
+                        data_vars=data_vars,
+                        coords={"time": [packet.timestamp],
+                                time: [packet.timestamp]}
+                    )
+                ], compat="override", combine_attrs="override")
+                # ds = xr.Dataset(
+                #     data_vars=data_vars,
+                #     coords={time: [packet.timestamp]}
+                # )
+                # if packet.data_record_type in (DataRecordType.BURST_VERSION2, DataRecordType.BURST_VERSION3):
+                #     all_burst_ds.append(ds)
+                # else:
+                #     all_average_ds.append(ds)
+                # ds = ds.combine_first(
+                #     xr.Dataset(
+                #         data_vars=data_vars,
+                #         coords={"time": [packet.timestamp],
+                #             time: [packet.timestamp]}
+                #     )
+                # )
+                # ds = ds.combine_first(
+                #     xr.Dataset(
+                #         data_vars=data_vars,
+                #         coords={"time": [packet.timestamp]}
+                #     )
+                # )
+                print(i)
+                i += 1
+        return ds
 
 
 class Ad2cpDataPacket:
     def __init__(self, f: BinaryIO, burst_average_data_record_version: BurstAverageDataRecordVersion):
         self.burst_average_data_record_version = burst_average_data_record_version
-        self.data_record_type: Optional[DataRecordType] = None
+        # self.data_record_type: Optional[DataRecordType] = None
         self.data = dict()
-        self._read_header(f)
-        self._read_data_record(f)
+        self._read_data_record_header(f)
+        self._read_data_record_body(f)
 
-    def _read_header(self, f: BinaryIO):
+    @property
+    def timestamp(self) -> np.datetime64:
+        year = self.data["year"] + 1900
+        month = self.data["month"] + 1
+        day = self.data["day"]
+        hour = self.data["hour"]
+        minute = self.data["minute"]
+        seconds = self.data["seconds"]
+        microsec100 = self.data["microsec100"]
+        return np.datetime64(f"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{seconds:02}.{microsec100:04}")
+
+    def _read_data_record_header(self, f: BinaryIO):
         """
         Reads the header part of the AD2CP packet from the stream
         """
 
-        raw_header = self._read_data(f, self.HEADER_FORMAT)
-        print("header checksum      calculated:", self.checksum(
-            raw_header[: -2]), "expected:", self.data["header_checksum"])
+        self.data_record_format = self.HEADER_FORMAT
+        raw_header = self._read_data(f, self.data_record_format)
+        # print("header checksum      calculated:", self.checksum(
+        #     raw_header[: -2]), "expected:", self.data["header_checksum"])
         # don't include the last 2 bytes, which is the header checksum itself
         assert self.checksum(
             raw_header[: -2]) == self.data["header_checksum"], "invalid header checksum"
 
-    def _read_data_record(self, f: BinaryIO):
+    def _read_data_record_body(self, f: BinaryIO):
         """
         Reads the data record part of the AD2CP packet from the stream
         """
 
-        print("data record type id:", self.data["id"])
-        # TODO: figure out where to send the other ids
-        if self.data["id"] in (0x15, 0x16, 0x18, ):  # burst/average
+        if self.data["id"] in (0x15, 0x18):  # burst
             if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
-                data_record_format = self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT
-                self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION2
+                self.data_record_format = self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.BURST_VERSION2
             elif self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION3:
-                data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
-                self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
+                self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.BURST_VERSION3
             else:
                 raise ValueError("invalid burst/average data record version")
+        elif self.data["id"] == 0x16:  # average
+            if self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION2:
+                self.data_record_format = self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.AVERAGE_VERSION2
+            elif self.burst_average_data_record_version == BurstAverageDataRecordVersion.VERSION3:
+                self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+                self.data_record_type = DataRecordType.AVERAGE_VERSION3
+            else:
+                raise ValueError("invalid burst/average data record version")
+        elif self.data["id"] in (0x17, 0x1b):  # bottom track
+            self.data_record_format = self.BOTTOM_TRACK_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.BOTTOM_TRACK
+        elif self.data["id"] == 0x1a:  # burst altimeter
+            # altimeter is only supported by burst/average version 3
+            self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.BURST_VERSION3
         elif self.data["id"] == 0x1c:  # echosounder
             # echosounder is only supported by burst/average version 3
-            data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
-            self.data_record_type = DataRecordType.BURST_AVERAGE_VERSION3
-        elif self.data["id"] in (0x17, 0x1b):  # bottom track
-            data_record_format = self.BOTTOM_TRACK_DATA_RECORD_FORMAT
-            self.data_record_type = DataRecordType.BOTTOM_TRACK
+            self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.AVERAGE_VERSION3
+        elif self.data["id"] == 0x1d:  # dvl water track record
+            # TODO: is this correct?
+            self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.AVERAGE_VERSION3
+        elif self.data["id"] == 0x1e:  # altimeter
+            # altimiter is only supported by burst/average version 3
+            self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.AVERAGE_VERSION3
+        elif self.data["id"] == 0x1f:  # average altimeter
+            self.data_record_format = self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT
+            self.data_record_type = DataRecordType.AVERAGE_VERSION3
         elif self.data["id"] == 0xa0:  # string data
-            data_record_format = self.STRING_DATA_RECORD_FORMAT
+            self.data_record_format = self.STRING_DATA_RECORD_FORMAT
             self.data_record_type = DataRecordType.STRING
         else:
             raise ValueError("invalid data record type id")
 
-        raw_data_record = self._read_data(f, data_record_format)
-        print("data record checksum calculated:", self.checksum(
-            raw_data_record), "expected:", self.data["data_record_checksum"])
+        raw_data_record = self._read_data(f, self.data_record_format)
+        # print("data record checksum calculated:", self.checksum(
+        #     raw_data_record), "expected:", self.data["data_record_checksum"])
         assert self.checksum(
             raw_data_record) == self.data["data_record_checksum"], "invalid data record checksum"
 
-    def _read_data(self, f: BinaryIO, data_format: List[type_field]) -> bytes:
+    def _read_data(self, f: BinaryIO, data_format: List[Field]) -> bytes:
         """
         Reads data from the stream, interpreting the data using the given format
         """
 
         raw_bytes = bytes()  # combination of all raw fields
         for field_format in data_format:
-            if len(field_format) == 4:
-                field_name, field_entry_size_bytes, field_entry_data_type, field_shape = field_format
-            elif len(field_format) == 5:
-                field_name, field_entry_size_bytes, field_entry_data_type, field_shape, predicate = field_format
-                if not predicate(self):
-                    continue
-            else:
-                # unreachable
-                raise RuntimeError
+            field_name = field_format.field_name
+            field_entry_size_bytes = field_format.field_entry_size_bytes
+            field_entry_data_type = field_format.field_entry_data_type
+            field_shape = field_format.field_shape
+            field_exists_predicate = field_format.field_exists_predicate
+            if not field_exists_predicate(self):
+                continue
             if callable(field_entry_size_bytes):
                 field_entry_size_bytes = field_entry_size_bytes(self)
             if callable(field_shape):
@@ -163,14 +549,18 @@ class Ad2cpDataPacket:
             if len(field_shape) == 0:
                 parsed_field = self._parse(raw_field, field_entry_data_type)
             else:
+                # split the field into entries of size field_entry_size_bytes
                 raw_field_entries = [raw_field[i * field_entry_size_bytes:(
                     i + 1) * field_entry_size_bytes] for i in range(math.prod(field_shape))]
+                # parse each entry individually
                 parsed_field_entries = [self._parse(
                     raw_field_entry, field_entry_data_type) for raw_field_entry in raw_field_entries]
+                # reshape the list of entries into the correct shape
                 parsed_field = np.reshape(parsed_field_entries, field_shape)
+            # we cannot check for this before reading because some fields are placeholder fields
+            # which, if not read in the correct order with other fields, will offset the rest of the data
             if field_name is not None:
                 self.data[field_name] = parsed_field
-                # setattr(self, field_name, parsed_field)
                 self._postprocess(field_name)
 
         return raw_bytes
@@ -184,6 +574,8 @@ class Ad2cpDataPacket:
         # all numbers are little endian
         if data_type == DataType.RAW_BYTES:
             return value
+        elif data_type == DataType.STRING:
+            return value.decode("utf-8")
         elif data_type == DataType.SIGNED_INTEGER:
             return int.from_bytes(
                 value, byteorder="little", signed=True)
@@ -228,7 +620,7 @@ class Ad2cpDataPacket:
         parsing each field in a data record.
         """
 
-        if self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION2:
+        if self.data_record_format == self.BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT:
             if field_name == "configuration":
                 self.data["pressure_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0001 > 0
                 self.data["temperature_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0010 > 0
@@ -243,7 +635,7 @@ class Ad2cpDataPacket:
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
                 self.data["num_beams"] = (
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
-        elif self.data_record_type == DataRecordType.BURST_AVERAGE_VERSION3:
+        elif self.data_record_format == self.BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT:
             if field_name == "configuration":
                 self.data["pressure_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0001 > 0
                 self.data["temperature_sensor_valid"] = self.data["configuration"] & 0b0000_0000_0000_0010 > 0
@@ -277,7 +669,7 @@ class Ad2cpDataPacket:
                     self.data["echo_sounder_frequency"] = self.data["ambiguity_velocity_or_echo_sounder_frequency"]
                 else:
                     self.data["ambiguity_velocity"] = self.data["ambiguity_velocity_or_echo_sounder_frequency"]
-        elif self.data_record_type == DataRecordType.BOTTOM_TRACK:
+        elif self.data_record_format == self.BOTTOM_TRACK_DATA_RECORD_FORMAT:
             if field_name == "configuration":
                 self.data["pressure_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_0001 > 0
                 self.data["temperature_sensor_valid"] = self.data["data"]["configuration"] & 0b0000_0000_0000_0010 > 0
@@ -292,6 +684,10 @@ class Ad2cpDataPacket:
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b0000_1100_0000_0000) >> 10
                 self.data["num_beams"] = (
                     self.data["num_beams_and_coordinate_system_and_num_cells"] & 0b1111_0000_0000_0000) >> 12
+
+        # TODO: bottom track record does not need this
+        # if field_name in ("velocity_data", "amplitude_data", "correlation_data", "echosounder_data"):
+        #     self.data[field_name] = (("beam", "range_bin"), self.data[field_name])
 
     @staticmethod
     def checksum(data: bytes) -> int:
@@ -308,155 +704,162 @@ class Ad2cpDataPacket:
             checksum %= 2 ** 16
         return checksum
 
-    # data formats (passed to self._read_data)
-    HEADER_FORMAT: List[type_field] = [
-        ("sync", 1, UNSIGNED_INTEGER, []),
-        ("header_size", 1, UNSIGNED_INTEGER, []),
-        ("id", 1, UNSIGNED_INTEGER, []),
-        ("family", 1, UNSIGNED_INTEGER, []),
-        ("data_record_size", 2, UNSIGNED_INTEGER, []),
-        ("data_record_checksum", 2, UNSIGNED_INTEGER, []),
-        ("header_checksum", 2, UNSIGNED_INTEGER, []),
+    HEADER_FORMAT: List[Field] = [
+        F("sync", 1, UNSIGNED_INTEGER),
+        F("header_size", 1, UNSIGNED_INTEGER),
+        F("id", 1, UNSIGNED_INTEGER),
+        F("family", 1, UNSIGNED_INTEGER),
+        F("data_record_size", 2, UNSIGNED_INTEGER),
+        F("data_record_checksum", 2, UNSIGNED_INTEGER),
+        F("header_checksum", 2, UNSIGNED_INTEGER),
     ]
-    STRING_DATA_RECORD_FORMAT: List[type_field] = [
-        ("string_data_id", 1, UNSIGNED_INTEGER, []),
-        ("string_data",
-         lambda self: self.data["data_record_size"] - 1, RAW_BYTES, []),
+    STRING_DATA_RECORD_FORMAT: List[Field] = [
+        F("string_data_id", 1, UNSIGNED_INTEGER),
+        F("string_data",
+          lambda self: self.data["data_record_size"] - 1, STRING),
     ]
-    BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT: List[type_field] = [
-        ("version", 1, UNSIGNED_INTEGER, []),
-        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
-        ("serial_number", 4, UNSIGNED_INTEGER, []),
-        ("configuration", 2, UNSIGNED_INTEGER, []),
-        ("year", 1, UNSIGNED_INTEGER, []),
-        ("month", 1, UNSIGNED_INTEGER, []),
-        ("day", 1, UNSIGNED_INTEGER, []),
-        ("hour", 1, UNSIGNED_INTEGER, []),
-        ("minute", 1, UNSIGNED_INTEGER, []),
-        ("seconds", 1, UNSIGNED_INTEGER, []),
-        ("microsec100", 2, UNSIGNED_INTEGER, []),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
-        ("temperature", 2, SIGNED_INTEGER, []),
-        ("pressure", 4, UNSIGNED_INTEGER, []),
-        ("heading", 2, UNSIGNED_INTEGER, []),
-        ("pitch", 2, SIGNED_INTEGER, []),
-        ("roll", 2, SIGNED_INTEGER, []),
-        ("error", 2, UNSIGNED_INTEGER, []),
-        ("status", 2, UNSIGNED_INTEGER, []),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
-        ("cell_size", 2, UNSIGNED_INTEGER, []),
-        ("blanking", 2, UNSIGNED_INTEGER, []),
-        ("velocity_range", 2, UNSIGNED_INTEGER, []),
-        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("ambiguity_velocity", 2, UNSIGNED_INTEGER, []),
-        ("dataset_description", 2, UNSIGNED_INTEGER, []),
-        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
-        ("velocity_scaling", 1, SIGNED_INTEGER, []),
-        ("power_level", 1, SIGNED_INTEGER, []),
-        (None, 4, UNSIGNED_INTEGER, []),
-        (
+    BURST_AVERAGE_VERSION2_DATA_RECORD_FORMAT: List[Field] = [
+        F("version", 1, UNSIGNED_INTEGER),
+        F("offset_of_data", 1, UNSIGNED_INTEGER),
+        F("serial_number", 4, UNSIGNED_INTEGER),
+        F("configuration", 2, UNSIGNED_INTEGER),
+        F("year", 1, UNSIGNED_INTEGER),
+        F("month", 1, UNSIGNED_INTEGER),
+        F("day", 1, UNSIGNED_INTEGER),
+        F("hour", 1, UNSIGNED_INTEGER),
+        F("minute", 1, UNSIGNED_INTEGER),
+        F("seconds", 1, UNSIGNED_INTEGER),
+        F("microsec100", 2, UNSIGNED_INTEGER),
+        F("speed_of_sound", 2, UNSIGNED_INTEGER),
+        F("temperature", 2, SIGNED_INTEGER),
+        F("pressure", 4, UNSIGNED_INTEGER),
+        F("heading", 2, UNSIGNED_INTEGER),
+        F("pitch", 2, SIGNED_INTEGER),
+        F("roll", 2, SIGNED_INTEGER),
+        F("error", 2, UNSIGNED_INTEGER),
+        F("status", 2, UNSIGNED_INTEGER),
+        F("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
+        F("cell_size", 2, UNSIGNED_INTEGER),
+        F("blanking", 2, UNSIGNED_INTEGER),
+        F("velocity_range", 2, UNSIGNED_INTEGER),
+        F("battery_voltage", 2, UNSIGNED_INTEGER),
+        F("magnetometer_raw_x", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_y", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_z", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
+        F("ambiguity_velocity", 2, UNSIGNED_INTEGER),
+        F("dataset_description", 2, UNSIGNED_INTEGER),
+        F("transmit_energy", 2, UNSIGNED_INTEGER),
+        F("velocity_scaling", 1, SIGNED_INTEGER),
+        F("power_level", 1, SIGNED_INTEGER),
+        F(None, 4, UNSIGNED_INTEGER),
+        F(
             "velocity_data",
             2,
             SIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["velocity_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["velocity_data_included"]
         ),
-        (
+        F(
             "amplitude_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["amplitude_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["amplitude_data_included"]
         ),
-        (
+        F(
             "correlation_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["correlation_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["correlation_data_included"]
         )
     ]
-    BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT: List[type_field] = [
-        ("version", 1, UNSIGNED_INTEGER, []),
-        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
-        ("configuration", 2, UNSIGNED_INTEGER, []),
-        ("serial_number", 4, UNSIGNED_INTEGER, []),
-        ("year", 1, UNSIGNED_INTEGER, []),
-        ("month", 1, UNSIGNED_INTEGER, []),
-        ("day", 1, UNSIGNED_INTEGER, []),
-        ("hour", 1, UNSIGNED_INTEGER, []),
-        ("minute", 1, UNSIGNED_INTEGER, []),
-        ("seconds", 1, UNSIGNED_INTEGER, []),
-        ("microsec100", 2, UNSIGNED_INTEGER, []),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
-        ("temperature", 2, SIGNED_INTEGER, []),
-        ("pressure", 4, UNSIGNED_INTEGER, []),
-        ("heading", 2, UNSIGNED_INTEGER, []),
-        ("pitch", 2, SIGNED_INTEGER, []),
-        ("roll", 2, SIGNED_INTEGER, []),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
-        ("cell_size", 2, UNSIGNED_INTEGER, []),
-        ("blanking", 2, UNSIGNED_INTEGER, []),
-        ("nominal_correlation", 1, UNSIGNED_INTEGER, []),
-        ("temperature_from_pressure_sensor", 1, UNSIGNED_INTEGER, []),
-        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("ambiguity_velocity_or_echo_sounder_frequency", 2, UNSIGNED_INTEGER, []),
-        ("dataset_description", 2, UNSIGNED_INTEGER, []),
-        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
-        ("velocity_scaling", 1, SIGNED_INTEGER, []),
-        ("power_level", 1, SIGNED_INTEGER, []),
-        ("magnetometer_temperature", 2, SIGNED_INTEGER, []),
-        ("real_time_clock_temperature", 2, SIGNED_INTEGER, []),
-        ("error", 2, UNSIGNED_INTEGER, []),
-        ("status0", 2, UNSIGNED_INTEGER, []),
-        ("status", 4, UNSIGNED_INTEGER, []),
-        ("ensemble_counter", 4, UNSIGNED_INTEGER, []),
-        (
+    BURST_AVERAGE_VERSION3_DATA_RECORD_FORMAT: List[Field] = [
+        F("version", 1, UNSIGNED_INTEGER),
+        F("offset_of_data", 1, UNSIGNED_INTEGER),
+        F("configuration", 2, UNSIGNED_INTEGER),
+        F("serial_number", 4, UNSIGNED_INTEGER),
+        F("year", 1, UNSIGNED_INTEGER),
+        F("month", 1, UNSIGNED_INTEGER),
+        F("day", 1, UNSIGNED_INTEGER),
+        F("hour", 1, UNSIGNED_INTEGER),
+        F("minute", 1, UNSIGNED_INTEGER),
+        F("seconds", 1, UNSIGNED_INTEGER),
+        F("microsec100", 2, UNSIGNED_INTEGER),
+        F("speed_of_sound", 2, UNSIGNED_INTEGER),
+        F("temperature", 2, SIGNED_INTEGER),
+        F("pressure", 4, UNSIGNED_INTEGER),
+        F("heading", 2, UNSIGNED_INTEGER),
+        F("pitch", 2, SIGNED_INTEGER),
+        F("roll", 2, SIGNED_INTEGER),
+        F("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
+        F("cell_size", 2, UNSIGNED_INTEGER),
+        F("blanking", 2, UNSIGNED_INTEGER),
+        F("nominal_correlation", 1, UNSIGNED_INTEGER),
+        F("temperature_from_pressure_sensor", 1, UNSIGNED_INTEGER),
+        F("battery_voltage", 2, UNSIGNED_INTEGER),
+        F("magnetometer_raw_x", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_y", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_z", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
+        F("ambiguity_velocity_or_echo_sounder_frequency", 2, UNSIGNED_INTEGER),
+        F("dataset_description", 2, UNSIGNED_INTEGER),
+        F("transmit_energy", 2, UNSIGNED_INTEGER),
+        F("velocity_scaling", 1, SIGNED_INTEGER),
+        F("power_level", 1, SIGNED_INTEGER),
+        F("magnetometer_temperature", 2, SIGNED_INTEGER),
+        F("real_time_clock_temperature", 2, SIGNED_INTEGER),
+        F("error", 2, UNSIGNED_INTEGER),
+        F("status0", 2, UNSIGNED_INTEGER),
+        F("status", 4, UNSIGNED_INTEGER),
+        F("ensemble_counter", 4, UNSIGNED_INTEGER),
+        F(
             "velocity_data",
             2,
             SIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["velocity_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["velocity_data_included"]
         ),
-        (
+        F(
             "amplitude_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["amplitude_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["amplitude_data_included"]
         ),
-        (
+        F(
             "correlation_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_beams"], self.data["num_cells"]],
-            lambda self: self.data["correlation_data_included"]
+            field_shape=lambda self: [
+                self.data["num_beams"], self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["correlation_data_included"]
         ),
-        ("altimiter_distance", 4, FLOAT, [],
-         lambda self: self.data["altimiter_data_included"]),
-        ("altimiter_quality", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.data["altimiter_data_included"]),
-        ("ast_distance", 4, FLOAT, [], lambda self: self.data["ast_data_included"]),
-        ("ast_quality", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.data["ast_data_included"]),
-        ("ast_offset_10us", 2, SIGNED_INTEGER, [],
-         lambda self: self.data["ast_data_included"]),
-        ("ast_pressure", 4, FLOAT, [], lambda self: self.data["ast_data_included"]),
-        ("altimiter_spare", 1, RAW_BYTES, [8], lambda self: self.data["ast_data_included"]
-         ),
-        (
+        F("altimiter_distance", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["altimiter_data_included"]),
+        F("altimiter_quality", 2, UNSIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["altimiter_data_included"]),
+        F("ast_distance", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ast_data_included"]),
+        F("ast_quality", 2, UNSIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["ast_data_included"]),
+        F("ast_offset_10us", 2, SIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["ast_data_included"]),
+        F("ast_pressure", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ast_data_included"]),
+        F("altimiter_spare", 1, RAW_BYTES, field_shape=[8], field_exists_predicate=lambda self: self.data["ast_data_included"]
+          ),
+        F(
             "altimiter_raw_data_num_samples",
             # The field size of this field is technically specified as number of samples * 2,
             # but seeing as the field is called "num samples," and the field which is supposed
@@ -464,138 +867,142 @@ class Ad2cpDataPacket:
             # sizes were likely incorrectly swapped.
             2,
             UNSIGNED_INTEGER,
-            [],
-            lambda self: self.data["altimiter_raw_data_included"]
+            field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"]
         ),
-        ("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER, [],
-         lambda self: self.data["altimiter_raw_data_included"]),
-        (
+        F("altimiter_raw_data_sample_distance", 2, UNSIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"]),
+        F(
             "altimiter_raw_data_samples",
             2,
             SIGNED_FRACTION,
-            lambda self: [self.data["altimiter_raw_data_num_samples"]],
-            lambda self: self.data["altimiter_raw_data_included"],
+            field_shape=lambda self: [
+                self.data["altimiter_raw_data_num_samples"]],
+            field_exists_predicate=lambda self: self.data["altimiter_raw_data_included"],
         ),
-        (
+        F(
             "echo_sounder_data",
             2,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_cells"]],
-            lambda self: self.data["echo_sounder_data_included"]
+            field_shape=lambda self: [self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["echo_sounder_data_included"]
         ),
-        ("ahrs_rotation_matrix_m11", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m12", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m13", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m21", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m22", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m23", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m31", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m32", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_rotation_matrix_m33", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m11", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m12", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m13", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m21", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m22", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m23", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m31", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m32", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_rotation_matrix_m33", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         # ("ahrs_rotation_matrix", 4, FLOAT, [
         #  3, 3], lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_quaternions_w", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_quaternions_x", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_quaternions_y", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_quaternions_z", 4, FLOAT, [],
-         lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_quaternions_w", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_quaternions_x", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_quaternions_y", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_quaternions_z", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         # ("ahrs_quaternions", 4, FLOAT, [4],
         #  lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_gyro_x", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_gyro_y", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
-        ("ahrs_gyro_z", 4, FLOAT, [], lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_gyro_x", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_gyro_y", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
+        F("ahrs_gyro_z", 4, FLOAT,
+          field_exists_predicate=lambda self: self.data["ahrs_data_included"]),
         # ("ahrs_gyro", 4, FLOAT, [3], lambda self: self.data["ahrs_data_included"]),
-        (
+        F(
             "percentage_good_data",
             1,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_cells"]],
-            lambda self: self.data["percentage_good_data_included"]
+            field_shape=lambda self: [self.data["num_cells"]],
+            field_exists_predicate=lambda self: self.data["percentage_good_data_included"]
         ),
         # only the pitch field is labeled as included when the "std dev data included"
         # bit is set, but this is likely a mistake
-        ("std_dev_pitch", 2, SIGNED_INTEGER, [],
-         lambda self: self.data["std_dev_data_included"]),
-        ("std_dev_roll", 2, SIGNED_INTEGER, [],
-         lambda self: self.data["std_dev_data_included"]),
-        ("std_dev_heading", 2, SIGNED_INTEGER, [],
-         lambda self: self.data["std_dev_data_included"]),
-        ("std_dev_pressure", 2, SIGNED_INTEGER, [],
-         lambda self: self.data["std_dev_data_included"]),
-        (None, 24, RAW_BYTES, [], lambda self: self.data["std_dev_data_included"])
+        F("std_dev_pitch", 2, SIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["std_dev_data_included"]),
+        F("std_dev_roll", 2, SIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["std_dev_data_included"]),
+        F("std_dev_heading", 2, SIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["std_dev_data_included"]),
+        F("std_dev_pressure", 2, SIGNED_INTEGER,
+          field_exists_predicate=lambda self: self.data["std_dev_data_included"]),
+        F(None, 24, RAW_BYTES,
+          field_exists_predicate=lambda self: self.data["std_dev_data_included"])
     ]
-    BOTTOM_TRACK_DATA_RECORD_FORMAT: List[type_field] = [
-        ("version", 1, UNSIGNED_INTEGER, []),
-        ("offset_of_data", 1, UNSIGNED_INTEGER, []),
-        ("configuration", 2, UNSIGNED_INTEGER, []),
-        ("serial_number", 4, UNSIGNED_INTEGER, []),
-        ("year", 1, UNSIGNED_INTEGER, []),
-        ("month", 1, UNSIGNED_INTEGER, []),
-        ("day", 1, UNSIGNED_INTEGER, []),
-        ("hour", 1, UNSIGNED_INTEGER, []),
-        ("minute", 1, UNSIGNED_INTEGER, []),
-        ("seconds", 1, UNSIGNED_INTEGER, []),
-        ("microsec100", 2, UNSIGNED_INTEGER, []),
-        ("speed_of_sound", 2, UNSIGNED_INTEGER, []),
-        ("temperature", 2, SIGNED_INTEGER, []),
-        ("pressure", 4, UNSIGNED_INTEGER, []),
-        ("heading", 2, UNSIGNED_INTEGER, []),
-        ("pitch", 2, SIGNED_INTEGER, []),
-        ("roll", 2, SIGNED_INTEGER, []),
-        ("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER, []),
-        ("cell_size", 2, UNSIGNED_INTEGER, []),
-        ("blanking", 2, UNSIGNED_INTEGER, []),
-        ("nominal_correlation", 1, UNSIGNED_INTEGER, []),
-        (None, 1, RAW_BYTES, []),
-        ("battery_voltage", 2, UNSIGNED_INTEGER, []),
-        ("magnetometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("magnetometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_x_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_y_axis", 2, SIGNED_INTEGER, []),
-        ("accelerometer_raw_z_axis", 2, SIGNED_INTEGER, []),
-        ("ambiguity_velocity", 4, UNSIGNED_INTEGER, []),
-        ("dataset_description", 2, UNSIGNED_INTEGER, []),
-        ("transmit_energy", 2, UNSIGNED_INTEGER, []),
-        ("velocity_scaling", 1, SIGNED_INTEGER, []),
-        ("power_level", 1, SIGNED_INTEGER, []),
-        ("magnetometer_temperature", 2, SIGNED_INTEGER, []),
-        ("real_time_clock_temperature", 2, SIGNED_INTEGER, []),
-        ("error", 4, UNSIGNED_INTEGER, []),
-        ("status", 4, UNSIGNED_INTEGER, []),
-        ("ensemble_counter", 4, UNSIGNED_INTEGER, []),
-        (
+    BOTTOM_TRACK_DATA_RECORD_FORMAT: List[Field] = [
+        F("version", 1, UNSIGNED_INTEGER),
+        F("offset_of_data", 1, UNSIGNED_INTEGER),
+        F("configuration", 2, UNSIGNED_INTEGER),
+        F("serial_number", 4, UNSIGNED_INTEGER),
+        F("year", 1, UNSIGNED_INTEGER),
+        F("month", 1, UNSIGNED_INTEGER),
+        F("day", 1, UNSIGNED_INTEGER),
+        F("hour", 1, UNSIGNED_INTEGER),
+        F("minute", 1, UNSIGNED_INTEGER),
+        F("seconds", 1, UNSIGNED_INTEGER),
+        F("microsec100", 2, UNSIGNED_INTEGER),
+        F("speed_of_sound", 2, UNSIGNED_INTEGER),
+        F("temperature", 2, SIGNED_INTEGER),
+        F("pressure", 4, UNSIGNED_INTEGER),
+        F("heading", 2, UNSIGNED_INTEGER),
+        F("pitch", 2, SIGNED_INTEGER),
+        F("roll", 2, SIGNED_INTEGER),
+        F("num_beams_and_coordinate_system_and_num_cells", 2, UNSIGNED_INTEGER),
+        F("cell_size", 2, UNSIGNED_INTEGER),
+        F("blanking", 2, UNSIGNED_INTEGER),
+        F("nominal_correlation", 1, UNSIGNED_INTEGER),
+        F(None, 1, RAW_BYTES),
+        F("battery_voltage", 2, UNSIGNED_INTEGER),
+        F("magnetometer_raw_x", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_y", 2, SIGNED_INTEGER),
+        F("magnetometer_raw_z", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_x_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_y_axis", 2, SIGNED_INTEGER),
+        F("accelerometer_raw_z_axis", 2, SIGNED_INTEGER),
+        F("ambiguity_velocity", 4, UNSIGNED_INTEGER),
+        F("dataset_description", 2, UNSIGNED_INTEGER),
+        F("transmit_energy", 2, UNSIGNED_INTEGER),
+        F("velocity_scaling", 1, SIGNED_INTEGER),
+        F("power_level", 1, SIGNED_INTEGER),
+        F("magnetometer_temperature", 2, SIGNED_INTEGER),
+        F("real_time_clock_temperature", 2, SIGNED_INTEGER),
+        F("error", 4, UNSIGNED_INTEGER),
+        F("status", 4, UNSIGNED_INTEGER),
+        F("ensemble_counter", 4, UNSIGNED_INTEGER),
+        F(
             "velocity_data",
             4,
             SIGNED_INTEGER,
-            lambda self: [self.data["num_beams"]],
-            lambda self: self.data["velocity_data_included"]
+            field_shape=lambda self: [self.data["num_beams"]],
+            field_exists_predicate=lambda self: self.data["velocity_data_included"]
         ),
-        (
+        F(
             "distance_data",
             4,
             SIGNED_INTEGER,
-            lambda self: [self.data["num_beams"]],
-            lambda self: self.data["distance_data_included"]
+            field_shape=lambda self: [self.data["num_beams"]],
+            field_exists_predicate=lambda self: self.data["distance_data_included"]
         ),
-        (
+        F(
             "figure_of_merit_data",
             2,
             UNSIGNED_INTEGER,
-            lambda self: [self.data["num_beams"]],
-            lambda self: self.data["figure_of_merit_data_included"]
+            field_shape=lambda self: [self.data["num_beams"]],
+            field_exists_predicate=lambda self: self.data["figure_of_merit_data_included"]
         )
     ]
 
@@ -610,3 +1017,13 @@ if __name__ == "__main__":
     # for packet in reader.packets:
     #     if hasattr(packet, "velocity_data"):
     #         print(packet.velocity_data)
+    # num_beams = dict()
+    # for p in reader.packets:
+    #     if "num_beams" in p.data:
+    #         if p.data["num_beams"] not in num_beams:
+    #             num_beams[p.data["num_beams"]] = 0
+    #         num_beams[p.data["num_beams"]] += 1
+    # print(num_beams)
+
+    x = SetGroupsAd2cp(reader, "test.nc")
+    x.save()
